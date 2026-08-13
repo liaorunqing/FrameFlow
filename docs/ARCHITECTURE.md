@@ -2,6 +2,8 @@
 
 FrameFlow is organized around a durable project record and a resumable, shot-level workflow. Paid generation nodes are separated from free planning and local post-production nodes.
 
+![FrameFlow architecture hero](assets/frameflow-architecture-hero.png)
+
 ```mermaid
 flowchart TB
   UI[React Studio] --> API[FastAPI Application]

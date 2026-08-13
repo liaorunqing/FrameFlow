@@ -4,6 +4,10 @@
 
 **简体中文** · [English](README.md) · [日本語](README.ja.md)
 
+![FrameFlow 故事型 AI 视频系统架构](docs/assets/frameflow-architecture-hero.png)
+
+## 创作界面
+
 ![FrameFlow 导演参数台](examples/screenshots/director-console.png)
 
 FrameFlow 将商品参考素材转换为结构清晰的广告视频。系统把创作决策放在付费生成之前：准备素材、比较多个脚本、锁定方向、设置配音与音乐、逐镜头生成、视觉质检，最后统一合成成片。

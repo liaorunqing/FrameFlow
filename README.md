@@ -4,6 +4,10 @@
 
 [简体中文](README.zh-CN.md) · **English** · [日本語](README.ja.md)
 
+![FrameFlow story-first AI video architecture](docs/assets/frameflow-architecture-hero.png)
+
+## Studio interface
+
 ![FrameFlow Director Console](examples/screenshots/director-console.png)
 
 FrameFlow is an end-to-end workflow for product video creation. It separates creative decisions from paid generation: prepare assets, compare multiple scripts, lock a direction, configure voice and music, generate shots, review visual consistency, and compose the final film.

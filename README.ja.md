@@ -4,6 +4,10 @@
 
 [简体中文](README.zh-CN.md) · [English](README.md) · **日本語**
 
+![FrameFlow ストーリー型 AI 動画アーキテクチャ](docs/assets/frameflow-architecture-hero.png)
+
+## スタジオ画面
+
 ![FrameFlow ディレクターコンソール](examples/screenshots/director-console.png)
 
 FrameFlow は、クリエイティブ判断と有料動画生成を分離します。素材を準備し、複数の脚本を比較して方向性を確定した後、音声・音楽を設定し、ショット単位の生成、品質確認、最終合成を行います。
