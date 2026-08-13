@@ -1,0 +1,17 @@
+{
+  "name": "frameflow-remotion",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts FrameFlowAd out/frameflow-ad.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.345",
+    "@remotion/media": "^4.0.345",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "remotion": "^4.0.345"
+  },
+  "devDependencies": {"typescript": "^5.9.2"}
+}

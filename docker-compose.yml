@@ -1,0 +1,16 @@
+services:
+  frameflow:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      VIDEO_PROVIDER: ${VIDEO_PROVIDER:-demo}
+      FAL_KEY: ${FAL_KEY:-}
+      DIRECTOR_API_BASE: ${DIRECTOR_API_BASE:-}
+      DIRECTOR_API_KEY: ${DIRECTOR_API_KEY:-}
+      DIRECTOR_MODEL: ${DIRECTOR_MODEL:-}
+    volumes:
+      - frameflow_data:/app/backend/data
+
+volumes:
+  frameflow_data:
