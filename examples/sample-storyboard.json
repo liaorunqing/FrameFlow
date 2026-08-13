@@ -1,0 +1,52 @@
+{
+  "campaign_idea": "倒下以后，再搭一次",
+  "duration": 30,
+  "aspect_ratio": "9:16",
+  "shots": [
+    {
+      "index": 1,
+      "title": "回家后的新任务",
+      "duration": 6,
+      "action": "孩子把书包放下，注意到桌面上尚未完成的轨道塔。",
+      "camera": "门口中景跟随，切至桌面低机位",
+      "voiceover": "今天，他想把昨天没完成的那座塔搭起来。",
+      "transition": "视线匹配"
+    },
+    {
+      "index": 2,
+      "title": "第一次倒塌",
+      "duration": 6,
+      "action": "孩子连接顶部模块，塔身倾斜并倒在地毯上。",
+      "camera": "手部近景接孩子表情特写",
+      "voiceover": "第一次尝试，并没有站稳。",
+      "transition": "积木落地声音桥"
+    },
+    {
+      "index": 3,
+      "title": "重新观察",
+      "duration": 6,
+      "action": "孩子比较底座宽度，拆下两块并改变连接方向。",
+      "camera": "俯拍结构细节，缓慢推近",
+      "voiceover": "他没有急着重来，而是先看清问题在哪里。",
+      "transition": "手部动作匹配"
+    },
+    {
+      "index": 4,
+      "title": "一起完成",
+      "duration": 6,
+      "action": "家人扶住底座，孩子完成最后一段轨道连接。",
+      "camera": "双人侧面中近景，焦点保持在搭建动作",
+      "voiceover": "一个人想到办法，两个人把它变成现实。",
+      "transition": "完成动作直切"
+    },
+    {
+      "index": 5,
+      "title": "作品开始运行",
+      "duration": 6,
+      "action": "小球沿轨道滚下，孩子抬头与家人相视而笑，最后展示完整产品。",
+      "camera": "跟随小球运动，抬镜至人物反应，产品定格",
+      "voiceover": "搭起来的不只是一座塔，还有下一次继续尝试的勇气。",
+      "transition": "后期叠加 Logo 与 CTA"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "星轨积木 30 秒故事广告",
+  "product_name": "星轨磁力积木",
+  "product_category": "益智玩具",
+  "platform": "抖音",
+  "duration": 30,
+  "aspect_ratio": "9:16",
+  "style": "真实生活叙事广告",
+  "audience": "希望和孩子共同完成动手项目的家庭",
+  "selling_points": [
+    "模块可自由组合",
+    "适合亲子共同搭建",
+    "搭建结果可以直观看见"
+  ],
+  "brief": "记录孩子放学回家后尝试搭建一座轨道塔，遇到结构不稳的问题，在家人的陪伴下调整组合方式并完成作品。",
+  "script_template": "story",
+  "shot_count": 5,
+  "narrative_pace": "balanced",
+  "hook_style": "problem",
+  "camera_style": "observational",
+  "lighting_style": "natural-warm",
+  "emotion_curve": "problem-relief-delight",
+  "narration_density": "medium",
+  "product_exposure": "natural",
+  "transition_style": "match-action",
+  "realism_level": "photoreal",
+  "negative_constraints": "禁止乱码、水印、额外人物、产品变形、手部异常和未经证实的功效",
+  "voice_id": "male-qn-qingse",
+  "voice_speed": 0.92,
+  "bgm_track": "house-vibez.mp3",
+  "bgm_volume": 0.13,
+  "subtitles_enabled": true
+}
