@@ -12,6 +12,16 @@
 
 ![导演参数台](screenshots/director-console.png)
 
+## 生成样片与关键帧
+
+[![15 秒木质积木广告样片](media/wooden-blocks-poster.jpg)](media/wooden-blocks-demo.mp4)
+
+▶ [播放完整 MP4](media/wooden-blocks-demo.mp4)
+
+| 开场关键帧 | 发展关键帧 | 收束关键帧 |
+|---|---|---|
+| ![](media/keyframe-01.jpg) | ![](media/keyframe-02.jpg) | ![](media/keyframe-03.jpg) |
+
 导演参数会真实进入脚本与镜头提示词，包括镜头数量、叙事节奏、前三秒钩子、摄影方式、光线、情绪曲线、产品露出、转场和负面约束。
 
 ## 数据示例
