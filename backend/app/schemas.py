@@ -195,6 +195,13 @@ class ProductionPreflight(BaseModel):
     blockers: list[str] = Field(default_factory=list)
 
 
+class ScriptCandidate(BaseModel):
+    id: str
+    label: str
+    template: str
+    plan: CreativePlan
+
+
 class Project(BaseModel):
     id: str
     status: Literal["draft", "planned", "rendering", "completed"] = "draft"
@@ -202,6 +209,7 @@ class Project(BaseModel):
     updated_at: datetime
     assets: list[Asset] = Field(default_factory=list)
     creative_plan: CreativePlan | None = None
+    script_candidates: list[ScriptCandidate] = Field(default_factory=list)
     latest_task: RenderTask | None = None
     output_url: str | None = None
     brand_bible: BrandBible | None = None
@@ -242,13 +250,6 @@ class Project(BaseModel):
 
 class LibraryAssetRequest(BaseModel):
     asset_id: str
-
-
-class ScriptCandidate(BaseModel):
-    id: str
-    label: str
-    template: str
-    plan: CreativePlan
 
 
 class ScriptSelectionRequest(BaseModel):

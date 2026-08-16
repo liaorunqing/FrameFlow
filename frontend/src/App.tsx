@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Aperture, Check, ChevronDown, CircleAlert, Clock3, Download, Eye, Film,
+  AlertCircle, Aperture, Check, ChevronDown, CircleAlert, Clock3, Download, Eye, Film,
   FolderOpen, ImagePlus, KeyRound, Layers3, LoaderCircle, Menu, Plus,
   Settings, Sparkles, Trash2, Upload, Video, WandSparkles, X,
 } from 'lucide-react'
@@ -132,6 +132,8 @@ function App() {
   const loadProject = async (id: string) => {
     const current = await api.project(id)
     setProject(current)
+    setScriptCandidates(current.script_candidates || [])
+    setSelectedCandidate('')
     // A freshly created project legitimately has no workflow yet. Avoid a
     // noisy 409 request in the browser console until generation starts.
     setWorkflow(current.creative_plan ? await api.workflow(id).catch(() => null) : null)
@@ -169,6 +171,7 @@ function App() {
       if (!current) current = await api.createProject({ name: '我的第一条视频' })
       setProjects(current && !list.length ? [current] : list)
       setProject(current)
+      setScriptCandidates(current.script_candidates || [])
       setWorkflow(current.creative_plan ? await api.workflow(current.id).catch(() => null) : null)
     }).catch(error => setMessage(error instanceof Error ? error.message : '无法连接后端'))
   }, [])
@@ -243,6 +246,10 @@ function App() {
         setProjects(items => items.map(item => item.id === understood.id ? understood : item))
         setScriptCandidates(candidates)
         setSelectedCandidate('')
+        setActivePanel('story')
+        window.requestAnimationFrame(() => {
+          document.querySelector('.candidate-deck')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        })
         setBusy(''); setMessage('已生成 3 个候选脚本。请选择并锁定一个方案。')
         return
       }
@@ -261,6 +268,21 @@ function App() {
       setMessage('脚本已锁定。现在可以设置声音与画面并生成视频。')
     } catch (error) { setMessage(error instanceof Error ? error.message : '脚本锁定失败') }
     finally { setBusy('') }
+  }
+
+  const unlockScript = async () => {
+    if (!project) return
+    setBusy('unlock-script'); setMessage('')
+    try {
+      const updated = await api.unlockScript(project.id)
+      setProject(updated)
+      setProjects(items => items.map(item => item.id === updated.id ? updated : item))
+      setScriptCandidates(updated.script_candidates || [])
+      setSelectedCandidate('')
+      setMessage(updated.script_candidates?.length ? '已解除锁定，可重新选择之前生成的脚本。' : '已解除锁定，当前没有历史候选脚本。')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '解除脚本锁定失败')
+    } finally { setBusy('') }
   }
 
   const blockingReview = project?.quality_mode === 'strict'
@@ -429,8 +451,8 @@ function App() {
             <label>视频时长<select value={project.duration} onChange={e => update('duration', Number(e.target.value))}><option value={15}>15 秒</option><option value={30}>30 秒</option><option value={45}>45 秒</option><option value={60}>60 秒</option></select></label>
             <label>画面比例<select value={project.aspect_ratio} onChange={e => update('aspect_ratio', e.target.value)}><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
           </div>
-          {scriptCandidates.length > 0 && !project.creative_plan && <div className="candidate-deck"><header><small>STEP 02 / SCRIPT SELECTION</small><h3>选择一个创作方向</h3><p>三个方案只生成脚本，不调用付费视频模型。</p></header><div>{scriptCandidates.map(candidate => <button key={candidate.id} className={selectedCandidate === candidate.id ? 'selected' : ''} onClick={() => setSelectedCandidate(candidate.id)}><span><em>{candidate.label}</em>{selectedCandidate === candidate.id && <Check/>}</span><b>{candidate.plan.campaign_idea}</b><p>{candidate.plan.logline}</p><small>{candidate.plan.shots.length} 镜头 · {candidate.plan.emotional_arc}</small></button>)}</div><button className="lock-script" disabled={!selectedCandidate || !!busy} onClick={() => void lockScript()}>{busy === 'lock-script' ? <LoaderCircle className="spin"/> : <Check/>}锁定所选脚本</button></div>}
-          {project.creative_plan && <div className="script-preview"><div><small>LOCKED SCRIPT / 已锁定脚本</small><h3>{project.creative_plan.campaign_idea}</h3><p>{project.creative_plan.logline}</p></div>{project.creative_plan.shots.map((shot, index) => <article key={shot.id}><em>{String(index + 1).padStart(2, '0')}</em><span><b>{shot.title}</b><p>{shot.action}</p><q>{shot.voiceover || '此镜头无旁白'}</q></span><time>{shot.duration}s</time></article>)}<button onClick={() => { update('creative_plan', undefined); setScriptCandidates([]); setSelectedCandidate('') }} disabled={!!busy}><WandSparkles/>解除锁定并重新生成候选</button></div>}
+          {scriptCandidates.length > 0 && !project.creative_plan && <div className="candidate-deck"><header><small>STEP 02 / SCRIPT SELECTION</small><h3>选择一个创作方向</h3><p>展开候选即可核对逐镜头画面、动作与旁白；此阶段不会调用视频生成模型。</p></header><div>{scriptCandidates.map(candidate => <article key={candidate.id} className={`${selectedCandidate === candidate.id ? 'selected' : ''} ${candidate.plan.director_source === 'fallback' ? 'fallback' : ''}`}><button className="candidate-summary" onClick={() => setSelectedCandidate(candidate.id)}><span><em>{candidate.label}</em>{selectedCandidate === candidate.id && <Check/>}</span><b>{candidate.plan.campaign_idea}</b><p>{candidate.plan.logline}</p><small>{candidate.plan.shots.length} 镜头 · {candidate.plan.emotional_arc}</small></button>{candidate.plan.director_source === 'fallback' && <div className="candidate-warning"><AlertCircle/><span><b>云端脚本未通过校验，当前为内置兜底方案</b><small>{candidate.plan.director_note}</small></span></div>}<details open={selectedCandidate === candidate.id}><summary>查看完整分镜脚本</summary><div className="candidate-shots">{candidate.plan.shots.map(shot => <section key={shot.id}><em>{String(shot.index).padStart(2, '0')}</em><div><b>{shot.title}</b><p><strong>画面</strong>{shot.visual}</p><p><strong>动作</strong>{shot.action}</p><q>{shot.voiceover || '此镜头无旁白'}</q></div><time>{shot.duration}s</time></section>)}</div><footer>导演模型：{candidate.plan.director_model || '内置导演'} · {candidate.plan.director_source === 'fallback' ? '兜底生成' : '云端生成'}</footer></details></article>)}</div><button className="lock-script" disabled={!selectedCandidate || !!busy || scriptCandidates.find(item => item.id === selectedCandidate)?.plan.director_source === 'fallback'} onClick={() => void lockScript()}>{busy === 'lock-script' ? <LoaderCircle className="spin"/> : <Check/>}锁定所选脚本</button></div>}
+          {project.creative_plan && <div className="script-preview"><div><small>LOCKED SCRIPT / 已锁定脚本</small><h3>{project.creative_plan.campaign_idea}</h3><p>{project.creative_plan.logline}</p></div>{project.creative_plan.shots.map((shot, index) => <article key={shot.id}><em>{String(index + 1).padStart(2, '0')}</em><span><b>{shot.title}</b><p>{shot.action}</p><q>{shot.voiceover || '此镜头无旁白'}</q></span><time>{shot.duration}s</time></article>)}<button onClick={() => void unlockScript()} disabled={!!busy}>{busy === 'unlock-script' ? <LoaderCircle className="spin"/> : <WandSparkles/>}解除锁定并返回候选脚本</button></div>}
         </>}
         <button className="panel-next" onClick={() => setActivePanel(activePanel === 'assets' ? 'story' : 'assets')}>{activePanel === 'assets' ? '下一步：创作设定' : '返回检查素材'}<ChevronDown/></button>
       </section>

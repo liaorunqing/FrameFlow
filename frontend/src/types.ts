@@ -161,6 +161,7 @@ export interface Project {
   updated_at: string
   assets: Asset[]
   creative_plan?: CreativePlan
+  script_candidates: ScriptCandidate[]
   latest_task?: RenderTask
   output_url?: string
   brand_bible?: BrandBible

@@ -85,6 +85,7 @@ export const api = {
   plan: (id: string) => request<Project>(`/api/projects/${id}/plan`, { method: 'POST' }),
   scriptCandidates: (id: string) => request<ScriptCandidate[]>(`/api/projects/${id}/script-candidates`, { method: 'POST' }),
   selectScript: (id: string, candidate: ScriptCandidate) => request<Project>(`/api/projects/${id}/script-selection`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ candidate }) }),
+  unlockScript: (id: string) => request<Project>(`/api/projects/${id}/script-unlock`, { method: 'POST' }),
   produce: (id: string, budgetCny: number) => request<WorkflowRun>(`/api/projects/${id}/produce`, {
     method: 'POST', headers: jsonHeaders, body: JSON.stringify({ budget_cny: budgetCny }),
   }),

@@ -35,3 +35,7 @@ backend/data/*
 !backend/data/workflows/
 !backend/data/workflows/.gitkeep
 !backend/data/store.json
+backend/data/workflows/*.json
+backend/data/workflow-artifacts/**
+backend/data/production/**
+backend/data/outputs/**

@@ -401,6 +401,7 @@ def use_library_asset(project_id: str, payload: LibraryAssetRequest) -> Asset:
     persist_project(project.model_copy(update={
         "assets": [*project.assets, asset],
         "creative_plan": None,
+        "script_candidates": [],
         "brand_bible": None,
         "asset_analysis_status": "pending",
         "asset_analysis_model": "",
@@ -420,6 +421,7 @@ def select_catalog_item(project_id: str, item_id: str) -> Project:
         raise HTTPException(status_code=404, detail="素材目录项不存在")
     updates = {
         "creative_plan": None,
+        "script_candidates": [],
         "brand_bible": None,
         "asset_analysis_status": "pending",
         "asset_analysis_model": "",
@@ -465,6 +467,7 @@ def delete_project_asset(project_id: str, asset_id: str) -> Project:
     return persist_project(project.model_copy(update={
         "assets": [item for item in project.assets if item.id != asset_id],
         "creative_plan": None,
+        "script_candidates": [],
         "brand_bible": None,
         "asset_analysis_status": "pending",
         "asset_analysis_model": "",
@@ -541,6 +544,16 @@ def repair_project_continuity(project_id: str) -> Project:
 def update_project(project_id: str, payload: ProjectPatch) -> Project:
     project = require_project(project_id)
     changes = payload.model_dump(exclude_none=True)
+    script_fields = {
+        "product_name", "product_category", "platform", "duration", "aspect_ratio",
+        "style", "audience", "selling_points", "brief", "script_template",
+        "narrative_pace", "shot_count", "hook_style", "camera_style",
+        "lighting_style", "emotion_curve", "narration_density",
+        "product_exposure", "transition_style", "realism_level",
+        "negative_constraints",
+    }
+    if any(key in script_fields and getattr(project, key) != value for key, value in changes.items()):
+        changes.update({"creative_plan": None, "script_candidates": [], "status": "draft"})
     return persist_project(project.model_copy(update={**changes, "updated_at": now()}))
 
 
@@ -591,6 +604,7 @@ async def upload_asset(
     persist_project(project.model_copy(update={
         "assets": [*project.assets, asset],
         "creative_plan": None,
+        "script_candidates": [],
         "brand_bible": None,
         "asset_analysis_status": "pending",
         "asset_analysis_model": "",
@@ -666,6 +680,10 @@ async def generate_script_candidates(project_id: str) -> list[ScriptCandidate]:
             "source_facts": list(project.asset_facts),
         })
         candidates.append(ScriptCandidate(id=f"candidate-{index}", label=label, template=template, plan=plan))
+    persist_project(project.model_copy(update={
+        "script_candidates": candidates,
+        "updated_at": now(),
+    }))
     return candidates
 
 
@@ -685,6 +703,16 @@ def select_script_candidate(project_id: str, payload: ScriptSelectionRequest) ->
         "creative_plan": payload.candidate.plan,
         "script_template": payload.candidate.template,
         "status": "planned",
+        "updated_at": now(),
+    }))
+
+
+@app.post("/api/projects/{project_id}/script-unlock", response_model=Project)
+def unlock_script_candidate(project_id: str) -> Project:
+    project = require_project(project_id)
+    return persist_project(project.model_copy(update={
+        "creative_plan": None,
+        "status": "draft",
         "updated_at": now(),
     }))
 
@@ -976,6 +1004,7 @@ async def _ensure_project_visual_context(project: Project) -> Project:
         "asset_facts": facts,
         "brand_bible": bible,
         "creative_plan": None,
+        "script_candidates": [],
         "brief": "" if project.brief.strip() in legacy_briefs else project.brief,
         "status": "draft",
         "updated_at": now(),

@@ -29,10 +29,11 @@ from backend.app.providers import MiniMaxOfficialVideoProvider, VideoJob
 from backend.app.pipeline_executor import PipelineExecutor, _deterministic_frame_metrics
 from backend.app.vision import OllamaVisionService, PairVisualComparison
 from backend.app.routing import route_shot
-from backend.app.schemas import Project
+from backend.app.schemas import Project, ScriptCandidate
 from backend.app.director import (
     DirectorPlanDraft,
     DirectorShotDraft,
+    _draft_to_plan,
     _fallback_plan,
     _parse_director_draft,
     ensure_narrated_ad_plan,
@@ -144,6 +145,66 @@ def test_qwen_object_shaped_continuity_is_coerced_without_fallback() -> None:
     parsed = _parse_director_draft(json.dumps(payload, ensure_ascii=False))
     assert isinstance(parsed, DirectorPlanDraft)
     assert parsed.continuity_bible[0] == "人物：同一人物与服装"
+
+
+def test_director_parser_repairs_minor_schema_overflow_without_fallback() -> None:
+    project = make_project()
+    plan = project.creative_plan
+    payload = {
+        "product_name": project.product_name,
+        **plan.model_dump(include={
+            "campaign_idea", "logline", "protagonist", "story_question", "hook",
+            "emotional_arc", "continuity_bible", "narration_script",
+            "visual_language", "music_direction", "call_to_action",
+        }),
+        "provider_comment": "discard this harmless extra field",
+        "shots": [
+            {
+                **DirectorShotDraft.model_validate(
+                    shot.model_dump(include=set(DirectorShotDraft.model_fields))
+                ).model_dump(),
+                "on_screen_text": "Soft everyday companion",
+                "model_hint": "standard",
+            }
+            for shot in plan.shots
+        ],
+    }
+    parsed = _parse_director_draft(json.dumps(payload, ensure_ascii=False))
+    assert parsed.shots[0].on_screen_text == "Soft everyday"
+    assert parsed.shots[0].model_hint == "story"
+
+
+def test_visual_product_identity_accepts_unnamed_ui_placeholder() -> None:
+    project = make_project().model_copy(update={"product_name": "待定义商品"})
+    fallback = _fallback_plan(project)
+    draft = DirectorPlanDraft(
+        product_name="视觉素材中的白色羊驼毛绒玩具",
+        **fallback.model_dump(include={
+            "campaign_idea", "logline", "protagonist", "story_question", "hook",
+            "emotional_arc", "continuity_bible", "narration_script",
+            "visual_language", "music_direction", "call_to_action",
+        }),
+        shots=[DirectorShotDraft.model_validate(
+            shot.model_dump(include=set(DirectorShotDraft.model_fields))
+        ) for shot in fallback.shots],
+    )
+    plan = _draft_to_plan(
+        draft, project=project, source="openai_compatible",
+        model="test-director", note="schema valid",
+    )
+    assert plan.director_source == "openai_compatible"
+
+
+def test_script_candidates_survive_project_serialization() -> None:
+    project = make_project()
+    candidate = ScriptCandidate(
+        id="candidate-1", label="故事叙事版", template="story",
+        plan=project.creative_plan,
+    )
+    restored = Project.model_validate(
+        project.model_copy(update={"script_candidates": [candidate]}).model_dump(mode="json")
+    )
+    assert restored.script_candidates[0].label == "故事叙事版"
 
 
 def test_partial_retry_preserves_upstream_nodes() -> None:
