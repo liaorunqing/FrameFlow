@@ -13,7 +13,7 @@ from .production import ProductionPlan
 from .schemas import Project
 
 
-WORKFLOW_VERSION = "frameflow-dag-v6"
+WORKFLOW_VERSION = "frameflow-dag-v8"
 
 
 NodeKind = Literal[
@@ -87,6 +87,10 @@ class WorkflowRun(BaseModel):
     version: str = WORKFLOW_VERSION
     status: Literal["draft", "running", "review_required", "completed", "failed"] = "draft"
     nodes: list[WorkflowNode]
+    live_preview_url: str = ""
+    live_preview_revision: int = 0
+    live_preview_ready_shots: int = 0
+    live_preview_complete: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -219,13 +223,20 @@ def build_workflow(project: Project, plan: ProductionPlan) -> WorkflowRun:
         video_id = f"video:{shot.shot_id}"
         review_id = f"video-review:{shot.shot_id}"
         video_review_ids.append(review_id)
+        # In the default creator-facing mode, visual review is an advisory
+        # sidecar. Generation depends on durable media artifacts rather than
+        # an AI judge, so a false positive cannot stall the whole production.
+        keyframe_dependency_kind = (
+            "keyframe-review" if project.quality_mode == "strict" else "keyframe"
+        )
         video_dependencies = [
-            f"keyframe-review:{shot.first_frame_id}",
-            f"keyframe-review:{shot.last_frame_id}",
+            f"{keyframe_dependency_kind}:{shot.first_frame_id}",
+            f"{keyframe_dependency_kind}:{shot.last_frame_id}",
         ]
         if shot_position > 1:
             previous_shot = plan.shots[shot_position - 2]
-            video_dependencies.append(f"video-review:{previous_shot.shot_id}")
+            previous_kind = "video-review" if project.quality_mode == "strict" else "video"
+            video_dependencies.append(f"{previous_kind}:{previous_shot.shot_id}")
         nodes.extend([
             WorkflowNode(
                 id=video_id,
@@ -269,7 +280,14 @@ def build_workflow(project: Project, plan: ProductionPlan) -> WorkflowRun:
             id="final-compose",
             kind="composition",
             label="FFmpeg精剪、Logo与CTA",
-            dependencies=[*video_review_ids, "audio-timeline"],
+            dependencies=[
+                *(
+                    video_review_ids
+                    if project.quality_mode == "strict"
+                    else [f"video:{shot.shot_id}" for shot in plan.shots]
+                ),
+                "audio-timeline",
+            ],
             cache_key=_fingerprint({
                 "aspect_ratio": project.aspect_ratio,
                 "duration": project.duration,

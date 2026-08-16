@@ -61,19 +61,24 @@ class OllamaVisionService:
     def __init__(self, *, purpose: str = "analysis") -> None:
         self.provider = getenv("VISION_PROVIDER", "ollama").strip().lower()
         self.purpose = purpose
-        if self.provider in {"dashscope", "cloud", "qwen"}:
-            self.provider = "dashscope"
-            self.base_url = getenv(
-                "VISION_CLOUD_API_BASE",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ).rstrip("/")
-            model_env = "VISION_REVIEW_MODEL" if purpose == "review" else "VISION_CLOUD_MODEL"
-            model_default = "qwen3.6-flash" if purpose == "review" else "qwen3.7-plus"
-            self.model = getenv(model_env, model_default).strip()
-            self.api_key = (
-                getenv("VISION_CLOUD_API_KEY", "").strip()
-                or getenv("DASHSCOPE_API_KEY", "").strip()
+        if self.provider in {"dashscope", "cloud", "qwen", "ark", "volcengine", "doubao"}:
+            requested_provider = self.provider
+            self.provider = "ark" if requested_provider in {"ark", "volcengine", "doubao"} else "dashscope"
+            default_base = (
+                "https://ark.cn-beijing.volces.com/api/v3"
+                if self.provider == "ark"
+                else "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
+            self.base_url = getenv("VISION_CLOUD_API_BASE", default_base).rstrip("/")
+            model_env = "VISION_REVIEW_MODEL" if purpose == "review" else "VISION_CLOUD_MODEL"
+            # Prefer the flagship multimodal model for both analysis and QC.
+            # Flash can still be selected explicitly with VISION_REVIEW_MODEL.
+            model_default = "doubao-seed-2-0-lite-260215" if self.provider == "ark" else "qwen3.7-plus"
+            self.model = getenv(model_env, model_default).strip()
+            fallback_key = "ARK_API_KEY" if self.provider == "ark" else "DASHSCOPE_API_KEY"
+            # Prefer the provider-specific key. This prevents a stale generic
+            # cloud key from silently crossing providers after a UI switch.
+            self.api_key = getenv(fallback_key, "").strip() or getenv("VISION_CLOUD_API_KEY", "").strip()
         else:
             self.provider = "ollama"
             self.base_url = getenv("VISION_API_BASE", "http://127.0.0.1:11434").rstrip("/")
@@ -102,7 +107,7 @@ class OllamaVisionService:
         images: list[str | Path],
         schema: type[BaseModel],
     ) -> BaseModel:
-        if self.provider == "dashscope":
+        if self.provider in {"dashscope", "ark"}:
             try:
                 return await self._structured_cloud(prompt=prompt, images=images, schema=schema)
             except httpx.TransportError as cloud_error:
@@ -165,8 +170,9 @@ class OllamaVisionService:
         schema: type[BaseModel],
     ) -> BaseModel:
         if not self.api_key:
+            expected = "ARK_API_KEY" if self.provider == "ark" else "DASHSCOPE_API_KEY"
             raise RuntimeError(
-                "VISION_PROVIDER=dashscope requires DASHSCOPE_API_KEY or VISION_CLOUD_API_KEY"
+                f"VISION_PROVIDER={self.provider} requires {expected} or VISION_CLOUD_API_KEY"
             )
         schema_json = schema.model_json_schema()
         content: list[dict] = [{

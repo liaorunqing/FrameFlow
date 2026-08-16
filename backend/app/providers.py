@@ -712,11 +712,18 @@ class VolcArkSeedanceProvider(VideoProvider):
                 model_id=str(result.get("model") or ""),
             )
         if status in {"failed", "cancelled"}:
-            return VideoJob(
-                external_id=external_id,
-                status="failed",
-                provider=self.name,
-                model_id=str(result.get("model") or ""),
+            error = result.get("error") or {}
+            code = str(error.get("code") or "") if isinstance(error, dict) else ""
+            message = str(error.get("message") or "") if isinstance(error, dict) else str(error)
+            if code == "SetLimitExceeded" or "inference limit" in message.lower():
+                raise RuntimeError(
+                    "火山方舟 Seedance 推理限额已触发（SetLimitExceeded），模型服务已暂停。"
+                    "请在模型开通管理中调整或关闭安全体验模式后，从当前镜头继续。"
+                )
+            detail = "：".join(part for part in (code, message) if part)
+            raise RuntimeError(
+                f"Seedance 视频任务 {external_id} 生成失败"
+                + (f"：{detail}" if detail else "。")
             )
         return VideoJob(external_id=external_id, status="processing", provider=self.name)
 

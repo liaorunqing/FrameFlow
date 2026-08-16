@@ -301,7 +301,7 @@ def prepare_benchmark(project: Project) -> BenchmarkExperiment:
                 status="planned" if providers["minimax-official"] and case.eligible else "unavailable",
             ),
         ])
-    keyframe_unit = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.25"))
+    keyframe_unit = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.22"))
     keyframe_count = sum(
         case.requires_composite_keyframe and case.eligible for case in cases
     )

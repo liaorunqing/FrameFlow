@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from os import getenv
 from typing import Literal
@@ -38,6 +39,7 @@ DIRECTOR_SYSTEM_PROMPT = """
 16. 声音以同期环境声和动作拟音为主体。允许短暂安静与画外声；音乐不得持续填满全片或替代真实反馈。
 17. 旁白采用第三人称观察或第一人称口述，只补充画面无法表达的信息；禁止电视购物腔、连续口号和参数朗读。
 18. 产品功能必须有“动作—反馈—人物反应”的证据链。无法视觉或听觉验证的功能不得写入本片。
+19. 除每镜头的 prompt 必须使用英文外，标题、故事梗概、动作、旁白、屏幕文字、转场与所有用户可见字段必须使用简体中文。
 """.strip()
 
 
@@ -329,11 +331,23 @@ def _fallback_plan(project: Project, reason: str = "未配置可用的导演模�
     )
 
 
+PLACEHOLDER_PRODUCT_NAMES = {"待定义商品", "未命名商品", "商品"}
+
+
+def _effective_product_name(project: Project) -> str:
+    product_name = project.product_name.strip()
+    if product_name in PLACEHOLDER_PRODUCT_NAMES:
+        return "上传参考图中的商品（名称未填写，以视觉事实描述为准）"
+    return product_name
+
+
 def _director_request(project: Project) -> str:
+    user_brief = project.brief.strip()
+    product_name = _effective_product_name(project)
     return json.dumps({
         "任务": "为以下产品创作一支具有完整因果关系、可逐镜头生成的观察式生活微纪录片。",
         "项目": {
-            "产品": project.product_name,
+            "产品": product_name,
             "品类": project.product_category,
             "平台": project.platform,
             "总时长": project.duration,
@@ -341,18 +355,27 @@ def _director_request(project: Project) -> str:
             "风格": project.style,
             "受众": project.audience,
             "卖点": project.selling_points,
-            "用户要求": project.brief,
+            "视觉模型从上传素材提取的事实（强约束）": project.asset_facts,
+            "用户故事要求（可选）": user_brief or "用户未指定故事；请根据真实素材、商品卖点、受众、平台和所选风格自主构思。",
+            "故事创作权限": (
+                "用户已填写故事要求：将其作为强约束，在不违反素材事实和安全规则的前提下忠实执行。"
+                if user_brief else
+                "用户未填写故事要求：由你自主决定人物目标、触发事件、行动、可见结果和情绪落点；避免空泛模板和卖点罗列。"
+            ),
             "已批准素材事实（强约束，不得改写或补造）": bible_constraints(project),
         },
         "输出要求": {
-            "product_name必须逐字复制项目中的产品名": project.product_name,
+            "故事中使用的产品身份": product_name,
             "所有JSON Schema字段都必须填写，不允许使用空字符串逃避故事设计": True,
             "所有镜头duration之和必须严格等于项目总时长": True,
             "15秒使用3个镜头，30秒使用5个镜头，镜头之间必须具有明确因果关系": True,
             "每个镜头都必须给出可执行的英文视频模型prompt": True,
+            "语言": "除 prompt 使用英文外，其余所有脚本字段必须使用自然、清楚的简体中文",
             "prompt必须包含具体动作、机位、光线、表演和连续性约束": True,
             "logline、protagonist、story_question必须具体描述本片人物与事件": True,
             "禁止替换成其他商品、品牌或示例故事": True,
+            "故事中的商品外观、人物、场景和动作条件必须能追溯到视觉素材事实": True,
+            "用户故事要求为空时必须主动完成原创故事设计，不能追问用户补写脚本": True,
             "儿童与家庭品类必须避开刀具、火源、污染和危险模仿动作": True,
             "商品出现方式必须自然、卫生、符合真实生活逻辑": True,
             "必须包含环境建立、真实操作、可见反馈或结果三类纪录片证据": True,
@@ -388,11 +411,26 @@ def _flatten_text(value: object) -> str:
     return str(value)
 
 
+def _fit_text(value: object, max_length: int) -> str:
+    """Keep a usable model phrase inside a presentation-field limit."""
+    text = _flatten_text(value)
+    if len(text) <= max_length:
+        return text
+    shortened = text[:max_length].rstrip(" ,，。;；:：-—")
+    if " " in shortened and max_length < len(text) and text[max_length].isalnum():
+        word_boundary = shortened.rfind(" ")
+        if word_boundary >= max_length // 2:
+            shortened = shortened[:word_boundary].rstrip()
+    return shortened
+
+
 def _parse_director_draft(content: str) -> DirectorPlanDraft:
     """Tolerate prose-shaped fields while preserving strict field coverage."""
     payload = json.loads(_clean_json_content(content))
     if not isinstance(payload, dict):
         raise ValueError("导演模型顶层结果必须是 JSON object")
+    allowed_plan_fields = set(DirectorPlanDraft.model_fields)
+    payload = {key: value for key, value in payload.items() if key in allowed_plan_fields}
     continuity = payload.get("continuity_bible", [])
     if isinstance(continuity, dict):
         continuity = list(continuity.values())
@@ -400,23 +438,35 @@ def _parse_director_draft(content: str) -> DirectorPlanDraft:
         continuity = [continuity]
     payload["continuity_bible"] = [
         text for text in (_flatten_text(item) for item in continuity) if text
-    ]
-    text_fields = {
-        "product_name", "campaign_idea", "logline", "protagonist",
-        "story_question", "hook", "emotional_arc", "narration_script",
-        "visual_language", "music_direction", "call_to_action",
+    ][:10]
+    text_limits = {
+        "product_name": 120, "campaign_idea": 120, "logline": 260,
+        "protagonist": 160, "story_question": 220, "hook": 220,
+        "emotional_arc": 220, "narration_script": 600,
+        "visual_language": 300, "music_direction": 300,
+        "call_to_action": 40,
     }
-    for field in text_fields:
+    for field, max_length in text_limits.items():
         if field in payload:
-            payload[field] = _flatten_text(payload[field])
+            payload[field] = _fit_text(payload[field], max_length)
+    shot_text_limits = {
+        "title": 80, "purpose": 180, "narrative_beat": 300,
+        "visual": 500, "camera": 240, "action": 360,
+        "voiceover": 180, "on_screen_text": 20,
+        "continuity_anchor": 300, "transition": 240, "prompt": 2000,
+    }
     for shot in payload.get("shots", []):
         if not isinstance(shot, dict):
             continue
-        for field in DirectorShotDraft.model_fields:
-            if field in {"duration", "model_hint"}:
-                continue
+        allowed_shot_fields = set(DirectorShotDraft.model_fields)
+        for key in list(shot):
+            if key not in allowed_shot_fields:
+                shot.pop(key)
+        for field, max_length in shot_text_limits.items():
             if field in shot:
-                shot[field] = _flatten_text(shot[field])
+                shot[field] = _fit_text(shot[field], max_length)
+        hint = str(shot.get("model_hint", "story")).strip().lower()
+        shot["model_hint"] = hint if hint in {"economy", "story", "premium"} else "story"
         # Some otherwise valid Qwen plans use terse film terms such as
         # "硬切". Preserve the choice, but expand it into an executable
         # continuity instruction instead of discarding the entire plan.
@@ -461,9 +511,13 @@ def _draft_to_plan(
     model: str,
     note: str,
 ) -> CreativePlan:
-    if draft.product_name.strip() != project.product_name.strip():
+    expected_product_name = _effective_product_name(project)
+    if (
+        project.product_name.strip() not in PLACEHOLDER_PRODUCT_NAMES
+        and draft.product_name.strip() != expected_product_name
+    ):
         raise ValueError(
-            f"导演写错产品：返回“{draft.product_name}”，应为“{project.product_name}”"
+            f"导演写错产品：返回“{draft.product_name}”，应为“{expected_product_name}”"
         )
     duration_sum = sum(shot.duration for shot in draft.shots)
     if duration_sum != project.duration:
@@ -472,6 +526,21 @@ def _draft_to_plan(
     expected_count = len(_durations(project.duration))
     if len(draft.shots) != expected_count:
         raise ValueError(f"镜头数量为 {len(draft.shots)}，当前时长应生成 {expected_count} 个镜头")
+
+    visible_script = " ".join([
+        draft.campaign_idea, draft.logline, draft.protagonist,
+        draft.story_question, draft.hook, draft.emotional_arc,
+        draft.narration_script, draft.visual_language,
+        draft.music_direction, draft.call_to_action,
+        *draft.continuity_bible,
+        *(value for shot in draft.shots for value in (
+            shot.title, shot.purpose, shot.narrative_beat, shot.visual,
+            shot.camera, shot.action, shot.voiceover, shot.on_screen_text,
+            shot.continuity_anchor, shot.transition,
+        )),
+    ])
+    if len(re.findall(r"[\u4e00-\u9fff]", visible_script)) < 20:
+        raise ValueError("脚本面向用户的字段必须使用简体中文，只有视频模型 prompt 使用英文")
 
     shots = [
         Shot(id=str(uuid4()), index=index, **shot.model_dump())
@@ -520,7 +589,12 @@ async def _request_director_draft(
         "messages": messages,
     }
     reasoning_effort = getenv("DIRECTOR_REASONING_EFFORT", "").strip().lower()
-    if reasoning_effort in {"none", "low", "medium", "high"}:
+    # Ark's OpenAI-compatible Chat endpoint currently rejects the
+    # reasoning_effort extension even though DashScope accepts it.
+    if "ark.cn-beijing.volces.com" in base_url:
+        payload["thinking"] = {"type": "disabled"}
+        payload["max_tokens"] = 5000
+    elif reasoning_effort in {"none", "low", "medium", "high"}:
         payload["reasoning_effort"] = reasoning_effort
     timeout = max(60.0, float(getenv("DIRECTOR_TIMEOUT_SECONDS", "180")))
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -577,6 +651,7 @@ async def generate_creative_plan(project: Project) -> CreativePlan:
             last_error = str(exc)
 
     reason = f"{model} 导演失败，已使用内置导演：{last_error or '未知错误'}"
+    logging.getLogger(__name__).error("Director fallback for project %s: %s", project.id, reason)
     return ensure_narrated_ad_plan(project, _fallback_plan(project, reason=reason))
 
 
