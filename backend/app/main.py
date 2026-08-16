@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+import hashlib
 import json
 import os
 import shutil
@@ -12,6 +14,7 @@ from uuid import uuid4
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv, set_key
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
@@ -51,6 +54,7 @@ from .orchestration import (
     upgrade_workflow,
 )
 from .pipeline_executor import PipelineExecutor
+from .live_preview import refresh_live_preview
 from .postprocess import EnhancementCapability, enhancement_capabilities
 from .quality_control import QualityBenchmarkReport, quality_benchmark
 from .integrations import (
@@ -87,18 +91,21 @@ from .schemas import (
 )
 from .store import JsonStore
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-PROJECT_DIR = BASE_DIR.parent
+_configured_home = os.getenv("FRAMEFLOW_HOME", "").strip()
+PROJECT_DIR = Path(_configured_home).resolve() if _configured_home else Path(__file__).resolve().parents[2]
+BASE_DIR = PROJECT_DIR / "backend"
 load_dotenv(BASE_DIR / ".env", override=True)
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "outputs"
 BENCHMARK_ARTIFACT_DIR = DATA_DIR / "benchmark-artifacts"
+CATALOG_ASSET_DIR = DATA_DIR / "catalog-assets"
 for runtime_dir in (
     UPLOAD_DIR,
     OUTPUT_DIR,
     DATA_DIR / "workflow-artifacts",
     BENCHMARK_ARTIFACT_DIR,
+    CATALOG_ASSET_DIR,
     DATA_DIR / "benchmark-reports",
     DATA_DIR / "benchmark-datasets",
     DATA_DIR / "benchmarks",
@@ -125,6 +132,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+app.mount("/catalog-assets", StaticFiles(directory=CATALOG_ASSET_DIR), name="catalog-assets")
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 app.mount(
     "/artifacts",
@@ -166,6 +174,7 @@ class VideoEvaluationRequest(BaseModel):
 
 class SetupRequest(BaseModel):
     dashscope_api_key: str = ""
+    ai_provider: str = "ark"
     video_provider: str = "minimax-official"
     minimax_api_key: str = ""
     seedance_api_key: str = ""
@@ -180,22 +189,27 @@ class SetupStatus(BaseModel):
     video_provider: str
     minimax_configured: bool
     seedance_configured: bool
+    ai_provider: str
 
 
 def _setup_status() -> SetupStatus:
     dashscope = bool(getenv("DASHSCOPE_API_KEY", "").strip())
+    ark = bool(getenv("ARK_API_KEY", "").strip())
+    ai_provider = getenv("VISION_PROVIDER", "dashscope").strip().lower()
+    ai_configured = ark if ai_provider == "ark" else dashscope
     provider = getenv("VIDEO_PROVIDER", "demo").strip()
     minimax_configured = bool(getenv("MINIMAX_API_KEY", "").strip())
     seedance_configured = bool(getenv("ARK_API_KEY", "").strip())
     video_configured = minimax_configured if provider == "minimax-official" else seedance_configured
     return SetupStatus(
-        ready=dashscope and video_configured,
-        director_configured=dashscope,
-        vision_configured=dashscope,
+        ready=ai_configured and video_configured,
+        director_configured=ai_configured,
+        vision_configured=ai_configured,
         video_configured=video_configured,
         video_provider=provider,
         minimax_configured=minimax_configured,
         seedance_configured=seedance_configured,
+        ai_provider=ai_provider,
     )
 
 
@@ -211,15 +225,31 @@ def save_setup(payload: SetupRequest) -> SetupStatus:
         raise HTTPException(status_code=422, detail="不支持的视频供应商")
     env_path = BASE_DIR / ".env"
     env_path.touch(exist_ok=True)
-    values = {
-        "VIDEO_PROVIDER": provider,
-        "VISION_PROVIDER": "dashscope",
-        "VISION_CLOUD_API_BASE": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "VISION_CLOUD_MODEL": "qwen3.7-plus",
-        "DIRECTOR_API_BASE": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "DIRECTOR_MODEL": "qwen3.6-flash",
-        "DIRECTOR_REASONING_EFFORT": "none",
-    }
+    ai_provider = payload.ai_provider.strip().lower()
+    if ai_provider not in {"dashscope", "ark"}:
+        raise HTTPException(status_code=422, detail="不支持的脚本/质检供应商")
+    if ai_provider == "ark":
+        values = {
+            "VIDEO_PROVIDER": provider,
+            "VISION_PROVIDER": "ark",
+            "VISION_CLOUD_API_BASE": "https://ark.cn-beijing.volces.com/api/v3",
+            "VISION_CLOUD_MODEL": "doubao-seed-2-0-lite-260215",
+            "VISION_REVIEW_MODEL": "doubao-seed-2-0-lite-260215",
+            "DIRECTOR_API_BASE": "https://ark.cn-beijing.volces.com/api/v3",
+            "DIRECTOR_MODEL": "doubao-seed-2-0-lite-260215",
+            "DIRECTOR_REASONING_EFFORT": "none",
+        }
+    else:
+        values = {
+            "VIDEO_PROVIDER": provider,
+            "VISION_PROVIDER": "dashscope",
+            "VISION_CLOUD_API_BASE": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "VISION_CLOUD_MODEL": "qwen3.7-plus",
+            "VISION_REVIEW_MODEL": "qwen3.7-plus",
+            "DIRECTOR_API_BASE": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "DIRECTOR_MODEL": "qwen3.6-flash",
+            "DIRECTOR_REASONING_EFFORT": "none",
+        }
     if payload.dashscope_api_key.strip():
         values["DASHSCOPE_API_KEY"] = payload.dashscope_api_key.strip()
         values["DIRECTOR_API_KEY"] = payload.dashscope_api_key.strip()
@@ -235,6 +265,11 @@ def save_setup(payload: SetupRequest) -> SetupStatus:
         values["MINIMAX_API_KEY"] = minimax_key
     if seedance_key:
         values["ARK_API_KEY"] = seedance_key
+    if ai_provider == "ark":
+        ark_key = seedance_key or getenv("ARK_API_KEY", "").strip()
+        if ark_key:
+            values["DIRECTOR_API_KEY"] = ark_key
+            values["VISION_CLOUD_API_KEY"] = ark_key
     for key, value in values.items():
         set_key(str(env_path), key, value, quote_mode="never")
         os.environ[key] = value
@@ -317,6 +352,24 @@ def audio_options() -> dict:
     }
 
 
+CATALOG_ITEMS = [
+    {"id": "character-girl", "kind": "character", "title": "自然光女孩", "description": "居家自然光、专注神态，适合生活化玩具广告。", "image_url": "/catalog-assets/character-girl.jpg", "source_url": "https://www.pexels.com/photo/a-girl-piling-cube-blocks-5894710/"},
+    {"id": "character-boy", "kind": "character", "title": "专注男孩", "description": "浅色服装与安静神态，适合学习和探索类叙事。", "image_url": "/catalog-assets/character-boy.jpg", "source_url": "https://www.pexels.com/photo/photo-of-a-boy-playing-with-wooden-toys-9271754/"},
+    {"id": "character-family", "kind": "character", "title": "双人伙伴", "description": "两位儿童共同出镜，适合互动与分享场景。", "image_url": "/catalog-assets/character-family.jpg", "source_url": "https://www.pexels.com/photo/two-children-playing-a-wooden-toys-3662666/"},
+    {"id": "product-rainbow", "kind": "product", "title": "彩虹积木", "description": "色彩和轮廓明确的木质玩具测试素材。", "image_url": "/catalog-assets/product-rainbow.jpg", "source_url": "https://www.pexels.com/photo/a-colorful-stack-toy-6219106/"},
+    {"id": "product-stacker", "kind": "product", "title": "彩色叠叠乐", "description": "白色背景、主体清楚，适合商品一致性测试。", "image_url": "/catalog-assets/product-stacker.jpg", "source_url": "https://www.pexels.com/photo/a-colorful-toy-stack-over-white-surfave-6743152/"},
+    {"id": "product-plush", "kind": "product", "title": "白色毛绒玩具", "description": "柔软材质与轮廓清晰，适合陪伴类画面测试。", "image_url": "/catalog-assets/product-plush.jpg", "source_url": "https://www.pexels.com/photo/close-up-shot-of-a-white-plush-toy-14587203/"},
+    {"id": "scene-modern-living", "kind": "scene", "title": "现代客厅", "description": "中性色家具与大面积自然光，适合家庭叙事。", "image_url": "/catalog-assets/scene-modern-living.jpg", "source_url": "https://www.pexels.com/photo/modern-living-room-9976128/"},
+    {"id": "scene-kids-bedroom", "kind": "scene", "title": "明亮儿童房", "description": "柔和纺织品、木质家具和窗光，适合玩具与陪伴故事。", "image_url": "/catalog-assets/scene-kids-bedroom.jpg", "source_url": "https://www.pexels.com/photo/kids-bedroom-interior-15625997/"},
+    {"id": "scene-bright-apartment", "kind": "scene", "title": "温暖公寓", "description": "沙发、木地板与柔和窗光，适合真实生活演示。", "image_url": "/catalog-assets/scene-bright-apartment.jpg", "source_url": "https://www.pexels.com/photo/interior-of-light-room-at-apartment-6186848/"},
+]
+
+
+@app.get("/api/catalog")
+def creative_catalog() -> list[dict]:
+    return CATALOG_ITEMS
+
+
 @app.get("/api/assets/library", response_model=list[Asset])
 def asset_library() -> list[Asset]:
     seen: set[str] = set()
@@ -345,8 +398,104 @@ def use_library_asset(project_id: str, payload: LibraryAssetRequest) -> Asset:
     target = target_dir / f"{asset_id}{source.suffix}"
     shutil.copy2(source, target)
     asset = source_asset.model_copy(update={"id": asset_id, "project_id": project_id, "url": f"/uploads/{project_id}/{target.name}", "created_at": now()})
-    persist_project(project.model_copy(update={"assets": [*project.assets, asset], "updated_at": now()}))
+    persist_project(project.model_copy(update={
+        "assets": [*project.assets, asset],
+        "creative_plan": None,
+        "brand_bible": None,
+        "asset_analysis_status": "pending",
+        "asset_analysis_model": "",
+        "analyzed_asset_ids": [],
+        "asset_facts": [],
+        "status": "draft",
+        "updated_at": now(),
+    }))
     return asset
+
+
+@app.post("/api/projects/{project_id}/catalog/{item_id}", response_model=Project)
+def select_catalog_item(project_id: str, item_id: str) -> Project:
+    project = require_project(project_id)
+    item = next((entry for entry in CATALOG_ITEMS if entry["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="素材目录项不存在")
+    updates = {
+        "creative_plan": None,
+        "brand_bible": None,
+        "asset_analysis_status": "pending",
+        "asset_analysis_model": "",
+        "analyzed_asset_ids": [],
+        "asset_facts": [],
+        "status": "draft",
+        "updated_at": now(),
+    }
+    source = CATALOG_ASSET_DIR / f"{item_id}.jpg"
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="内置素材文件缺失")
+    asset_id = str(uuid4())
+    target_dir = UPLOAD_DIR / project_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{asset_id}.jpg"
+    shutil.copy2(source, target)
+    asset = Asset(
+        id=asset_id,
+        project_id=project_id,
+        kind=AssetKind(item["kind"]),
+        name=f"catalog-{item_id}.jpg",
+        url=f"/uploads/{project_id}/{target.name}",
+        content_type="image/jpeg",
+        size=target.stat().st_size,
+        created_at=now(),
+    )
+    return persist_project(project.model_copy(update={
+        **updates,
+        "assets": [*project.assets, asset],
+    }))
+
+
+@app.delete("/api/projects/{project_id}/assets/{asset_id}", response_model=Project)
+def delete_project_asset(project_id: str, asset_id: str) -> Project:
+    project = require_project(project_id)
+    asset = next((item for item in project.assets if item.id == asset_id), None)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    path = (UPLOAD_DIR / project_id / Path(asset.url).name).resolve()
+    project_root = (UPLOAD_DIR / project_id).resolve()
+    if path.parent == project_root and path.is_file():
+        path.unlink()
+    return persist_project(project.model_copy(update={
+        "assets": [item for item in project.assets if item.id != asset_id],
+        "creative_plan": None,
+        "brand_bible": None,
+        "asset_analysis_status": "pending",
+        "asset_analysis_model": "",
+        "analyzed_asset_ids": [],
+        "asset_facts": [],
+        "status": "draft",
+        "output_url": None,
+        "updated_at": now(),
+    }))
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str) -> dict:
+    require_project(project_id)
+    if not store.delete_project(project_id):
+        raise HTTPException(status_code=404, detail="项目不存在")
+    for root, suffix in [
+        (UPLOAD_DIR, ""),
+        (DATA_DIR / "workflow-artifacts", ""),
+        (DATA_DIR / "production", ".json"),
+        (DATA_DIR / "workflows", ".json"),
+    ]:
+        target = (root / f"{project_id}{suffix}").resolve()
+        root_resolved = root.resolve()
+        if target.parent != root_resolved:
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.is_file():
+            target.unlink()
+    return {"deleted": True, "project_id": project_id}
 
 
 @app.post("/api/projects", response_model=Project, status_code=201)
@@ -439,7 +588,17 @@ async def upload_asset(
         size=len(content),
         created_at=now(),
     )
-    persist_project(project.model_copy(update={"assets": [*project.assets, asset], "updated_at": now()}))
+    persist_project(project.model_copy(update={
+        "assets": [*project.assets, asset],
+        "creative_plan": None,
+        "brand_bible": None,
+        "asset_analysis_status": "pending",
+        "asset_analysis_model": "",
+        "analyzed_asset_ids": [],
+        "asset_facts": [],
+        "status": "draft",
+        "updated_at": now(),
+    }))
     return asset
 
 
@@ -461,7 +620,11 @@ async def plan_project(project_id: str) -> Project:
         f"禁止内容 {project.negative_constraints}。严格按目标镜头数规划，并把参数写入 visual、camera、"
         "transition、voiceover 与 prompt，而不只是写在说明中。"
     )
-    guided = project.model_copy(update={"brief": f"{project.brief}\n\n脚本模板约束：{template_guides.get(project.script_template, template_guides['story'])}\n{control_guide}"})
+    user_intent = project.brief.strip()
+    guided = project.model_copy(update={"brief": (
+        f"{user_intent}\n\n" if user_intent else
+        "用户没有指定故事情节，请由 AI 导演结合真实素材与产品卖点原创一个具体、自然、有因果关系的故事。\n\n"
+    ) + f"脚本模板约束：{template_guides.get(project.script_template, template_guides['story'])}\n{control_guide}"})
     plan = await generate_creative_plan(guided)
     updated = persist_project(project.model_copy(update={
         "creative_plan": plan,
@@ -474,19 +637,34 @@ async def plan_project(project_id: str) -> Project:
 
 @app.post("/api/projects/{project_id}/script-candidates", response_model=list[ScriptCandidate])
 async def generate_script_candidates(project_id: str) -> list[ScriptCandidate]:
-    project = require_project(project_id)
+    project = await _ensure_project_visual_context(require_project(project_id))
     variants = [
         ("story", "故事叙事版", "用人物目标和情绪变化推动故事，产品自然进入行动。"),
         ("feature-proof", "功能实证版", "用操作、产品反馈、人物反应构成可见证据链。"),
         ("documentary", "生活纪录版", "使用观察式镜头和克制旁白，保留真实生活细节。"),
     ]
     candidates: list[ScriptCandidate] = []
+    user_intent = project.brief.strip()
     for index, (template, label, instruction) in enumerate(variants, start=1):
         guided = project.model_copy(update={
             "script_template": template,
-            "brief": f"{project.brief}\n候选方案方向：{instruction}\n生成一个与其他候选明显不同、但严格遵守产品事实的方案。",
+            "brief": (
+                f"用户指定的故事要求（必须遵守）：{user_intent}\n" if user_intent else
+                "用户未指定故事情节，请由 AI 导演自主构思。\n"
+            ) + f"候选方案方向：{instruction}\n生成一个与其他候选明显不同、但严格遵守产品事实的方案。",
         })
         plan = await generate_creative_plan(guided)
+        version_payload = json.dumps({
+            "asset_ids": project.analyzed_asset_ids,
+            "facts": project.asset_facts,
+            "template": template,
+            "plan": plan.model_dump(mode="json"),
+        }, ensure_ascii=False, sort_keys=True, default=str)
+        plan = plan.model_copy(update={
+            "version_id": hashlib.sha256(version_payload.encode("utf-8")).hexdigest()[:16],
+            "source_asset_ids": list(project.analyzed_asset_ids),
+            "source_facts": list(project.asset_facts),
+        })
         candidates.append(ScriptCandidate(id=f"candidate-{index}", label=label, template=template, plan=plan))
     return candidates
 
@@ -494,6 +672,15 @@ async def generate_script_candidates(project_id: str) -> list[ScriptCandidate]:
 @app.post("/api/projects/{project_id}/script-selection", response_model=Project)
 def select_script_candidate(project_id: str, payload: ScriptSelectionRequest) -> Project:
     project = require_project(project_id)
+    current_asset_ids = [asset.id for asset in project.assets]
+    if (
+        payload.candidate.plan.source_asset_ids != current_asset_ids
+        or not payload.candidate.plan.source_facts
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="候选脚本不是依据当前上传素材生成的，请重新执行素材理解并生成脚本。",
+        )
     return persist_project(project.model_copy(update={
         "creative_plan": payload.candidate.plan,
         "script_template": payload.candidate.template,
@@ -548,9 +735,13 @@ def get_production_preflight(project_id: str) -> ProductionPreflight:
         plan = build_production_plan(project)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    phrase = f"确认生产 30 秒广告，预算 ¥{plan.budget_ceiling_cny:.2f}"
+    phrase = f"确认生产 {project.duration} 秒广告，预算 ¥{plan.budget_ceiling_cny:.2f}"
     blockers: list[str] = []
-    checks = ["已冻结 5 镜头、6 张共享边界帧", "Logo、CTA、字幕仅由 FFmpeg 后期叠加", "视频默认路由为 MiniMax Fast；Seedance 仅人工升级"]
+    checks = [
+        f"已冻结 {len(plan.shots)} 镜头、{len(plan.keyframes)} 张共享边界帧",
+        "Logo、CTA、字幕仅由 FFmpeg 后期叠加",
+        "视频默认路由为 MiniMax Fast；Seedance 仅人工升级",
+    ]
     if not project.brand_bible:
         blockers.append("尚未创建 Brand Bible 草案。")
     elif project.brand_bible.status != "approved":
@@ -585,7 +776,7 @@ class ProductionBudgetApprovalRequest(BaseModel):
 def approve_production_budget(project_id: str, payload: ProductionBudgetApprovalRequest) -> ProductionBudget:
     project = require_project(project_id)
     plan = build_production_plan(project)
-    expected = f"确认生产 30 秒广告，预算 ¥{plan.budget_ceiling_cny:.2f}"
+    expected = f"确认生产 {project.duration} 秒广告，预算 ¥{plan.budget_ceiling_cny:.2f}"
     if payload.approval_phrase.strip() != expected:
         raise HTTPException(status_code=409, detail=f"请使用精确确认语：{expected}")
     if abs(payload.approved_budget_cny - plan.budget_ceiling_cny) > 0.0001:
@@ -619,6 +810,37 @@ class WorkflowApprovalRequest(BaseModel):
 
 class OneClickProductionRequest(BaseModel):
     budget_cny: float = Field(default=30, gt=0, le=500)
+
+
+@app.post(
+    "/api/projects/{project_id}/workflow/budget/approve",
+    response_model=ProductionBudget,
+)
+def approve_workflow_budget(
+    project_id: str,
+    payload: OneClickProductionRequest,
+) -> ProductionBudget:
+    """Approve a visible UI budget without rebuilding the existing workflow."""
+    project = require_project(project_id)
+    run = workflow_store.get(project_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="工作流尚未创建。")
+    if run.actual_cost_cny > payload.budget_cny + 0.0001:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前已产生 ¥{run.actual_cost_cny:.2f}，预算不能低于已发生费用。",
+        )
+    budget = ProductionBudget(
+        ceiling_cny=payload.budget_cny,
+        approved_cny=payload.budget_cny,
+        approval_phrase="前端局部重做确认",
+        approved_at=now(),
+    )
+    persist_project(project.model_copy(update={
+        "production_budget": budget,
+        "updated_at": now(),
+    }))
+    return budget
 
 
 class BenchmarkApprovalRequest(BaseModel):
@@ -660,6 +882,109 @@ def _workflow_asset_profiles(project: Project) -> dict[str, AssetVisualProfile]:
             except ValueError:
                 continue
     return profiles
+
+
+async def _ensure_project_visual_context(project: Project) -> Project:
+    """Analyze every uploaded reference before any director call is allowed."""
+    legacy_briefs = {
+        "记录真实人物在具体生活情境中的一次使用过程，以动作、反馈和自然反应呈现产品价值。",
+        "记录一个真实人物解决具体问题的过程；让商品自然进入行动，每个功能都必须形成动作、反馈和人物反应的证据链。",
+    }
+    asset_ids = [asset.id for asset in project.assets]
+    cached_profiles = _workflow_asset_profiles(project)
+    if (
+        project.asset_analysis_status == "ready"
+        and project.analyzed_asset_ids == asset_ids
+        and project.asset_facts
+        and len(cached_profiles) == len(project.assets)
+        and project.brand_bible
+        and project.brand_bible.status == "approved"
+    ):
+        return project
+    if not project.assets:
+        raise HTTPException(status_code=409, detail="请先上传商品图片，再生成创作方向。")
+
+    persist_project(project.model_copy(update={
+        "asset_analysis_status": "running",
+        "updated_at": now(),
+    }))
+    service = OllamaVisionService(purpose="analysis")
+    profiles_by_path: dict[str, dict] = {}
+    profiles_by_id: dict[str, AssetVisualProfile] = {}
+    errors: list[str] = []
+    kind_labels = {
+        AssetKind.product: "商品",
+        AssetKind.character: "人物",
+        AssetKind.scene: "场景",
+        AssetKind.brand: "品牌",
+    }
+    for asset in project.assets:
+        path = UPLOAD_DIR / project.id / Path(asset.url).name
+        try:
+            profile = await service.analyze_asset(
+                image_path=path,
+                asset_type=asset.kind.value,
+            )
+            profiles_by_path[str(path)] = profile.model_dump(mode="json")
+            profiles_by_id[asset.id] = profile
+        except Exception as exc:
+            errors.append(f"{asset.name}: {exc}")
+
+    if errors or len(profiles_by_id) != len(project.assets):
+        failed = project.model_copy(update={
+            "asset_analysis_status": "failed",
+            "asset_analysis_model": service.model,
+            "updated_at": now(),
+        })
+        persist_project(failed)
+        raise HTTPException(
+            status_code=502,
+            detail="素材视觉理解失败，尚未调用导演模型：" + "；".join(errors),
+        )
+
+    root = DATA_DIR / "workflow-artifacts" / project.id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "asset-profiles.json").write_text(
+        json.dumps(profiles_by_path, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    facts: list[str] = []
+    for asset in project.assets:
+        profile = profiles_by_id[asset.id]
+        label = kind_labels[asset.kind]
+        facts.append(f"{label}素材《{asset.name}》：{profile.summary}")
+        facts.extend(f"{label}不可变事实：{item}" for item in profile.immutable_features[:6])
+        facts.extend(f"{label}结构/身份：{item}" for item in profile.geometry_or_identity[:4])
+    facts = list(dict.fromkeys(fact.strip() for fact in facts if fact.strip()))
+    bible = draft_brand_bible(project, profiles=profiles_by_id).model_copy(update={
+        "status": "approved",
+        "updated_at": now(),
+    })
+    conflicts = bible_conflicts(bible)
+    if conflicts:
+        persist_project(project.model_copy(update={
+            "asset_analysis_status": "failed",
+            "brand_bible": bible.model_copy(update={"status": "conflict"}),
+            "asset_facts": facts,
+            "updated_at": now(),
+        }))
+        raise HTTPException(status_code=409, detail="素材事实存在冲突：" + "；".join(conflicts))
+    return persist_project(project.model_copy(update={
+        "asset_analysis_status": "ready",
+        "asset_analysis_model": service.model,
+        "analyzed_asset_ids": asset_ids,
+        "asset_facts": facts,
+        "brand_bible": bible,
+        "creative_plan": None,
+        "brief": "" if project.brief.strip() in legacy_briefs else project.brief,
+        "status": "draft",
+        "updated_at": now(),
+    }))
+
+
+@app.post("/api/projects/{project_id}/creative-context/analyze", response_model=Project)
+async def analyze_creative_context(project_id: str) -> Project:
+    return await _ensure_project_visual_context(require_project(project_id))
 
 
 @app.post("/api/projects/{project_id}/brand-bible/draft", response_model=BrandBible)
@@ -730,7 +1055,13 @@ def create_project_workflow(
 
 
 async def _run_one_click_production(project_id: str) -> None:
-    """Run the approved DAG until completion or a real QC/provider failure."""
+    """Run the approved DAG until completion or a genuine blocking failure.
+
+    Visual review is advisory by default. This mirrors modern shot-based
+    studios: a generated take remains available on the timeline while its
+    review report travels alongside it. Strict mode can still hold major or
+    critical findings; technical mode omits cloud visual judging altogether.
+    """
     try:
         while True:
             project = require_project(project_id)
@@ -742,34 +1073,41 @@ async def _run_one_click_production(project_id: str) -> None:
             if review:
                 passed = bool(review.attempts) and review.attempts[-1].outputs.get("passed") != "false"
                 if not passed:
-                    generation_id = (
-                        review.id.replace("keyframe-review:", "keyframe:")
-                        if review.kind == "keyframe_review"
-                        else review.id.replace("video-review:", "video:")
-                        if review.kind == "video_review"
-                        else ""
+                    score = int(review.quality_decision.get("score", 0) or 0)
+                    severity = str(review.quality_decision.get("severity", "major"))
+                    # Personal-studio mode keeps visual review in the background.
+                    # A clearly weak output gets one bounded local retry; acceptable
+                    # takes continue without exposing a numeric score in the UI.
+                    if project.quality_mode == "advisory" and score < 60:
+                        target_id = (
+                            review.id.replace("keyframe-review:", "keyframe:", 1)
+                            if review.kind == "keyframe_review"
+                            else review.id.replace("video-review:", "video:", 1)
+                        )
+                        target = next((node for node in run.nodes if node.id == target_id), None)
+                        approved_budget = (
+                            project.production_budget.approved_cny
+                            if project.production_budget and project.production_budget.approved
+                            else 0
+                        )
+                        can_retry_once = bool(target and len(target.attempts) == 1)
+                        within_budget = bool(
+                            target
+                            and run.actual_cost_cny + target.estimated_cost_cny
+                            <= approved_budget + 0.0001
+                        )
+                        if can_retry_once and within_budget:
+                            reset_node_and_descendants(run, target_id)
+                            workflow_store.put(run)
+                            continue
+                    should_hold = (
+                        project.quality_mode == "strict"
+                        and severity in {"major", "critical"}
                     )
-                    generation = next((node for node in run.nodes if node.id == generation_id), None)
-                    approved_budget = (
-                        project.production_budget.approved_cny
-                        if project.production_budget and project.production_budget.approved
-                        else 0
-                    )
-                    within_project_budget = (
-                        generation is not None
-                        and run.actual_cost_cny + generation.estimated_cost_cny <= approved_budget + 0.0001
-                    )
-                    within_review_budget = (
-                        review.attempts[-1].outputs.get("within_budget", "true") != "false"
-                    )
-                    retries_available = (
-                        generation is not None and generation.retry_count < generation.max_retries
-                    )
-                    if generation and retries_available and within_project_budget and within_review_budget:
-                        reset_node_and_descendants(run, generation.id)
-                        workflow_store.put(run)
-                        continue
-                    return
+                    if should_hold:
+                        # Strict commercial review deliberately pauses, but
+                        # never submits a paid retry without an operator.
+                        return
                 approve_node(run, review.id)
                 workflow_store.put(run)
                 continue
@@ -784,12 +1122,50 @@ async def _run_one_click_production(project_id: str) -> None:
                     }))
                 return
 
-            await pipeline_executor.execute(
+            if (
+                project.quality_mode == "technical"
+                and ready.kind in {"keyframe_review", "video_review"}
+            ):
+                ready.status = "skipped"
+                ready.progress = 100
+                ready.issues = ["仅技术检查模式：已跳过云端视觉审美判断。"]
+                refresh_readiness(run)
+                workflow_store.put(run)
+                continue
+
+            if ready.billable:
+                approved_budget = (
+                    project.production_budget.approved_cny
+                    if project.production_budget and project.production_budget.approved
+                    else 0
+                )
+                if run.actual_cost_cny + ready.estimated_cost_cny > approved_budget + 0.0001:
+                    ready.status = "failed"
+                    ready.issues = [
+                        "本次局部重做会超过项目预算上限，未提交新的付费任务。"
+                    ]
+                    refresh_readiness(run)
+                    workflow_store.put(run)
+                    return
+
+            run = await pipeline_executor.execute(
                 project=project,
                 run=run,
                 node_id=ready.id,
                 confirm_billable=True,
             )
+            if ready.kind == "video_generation":
+                try:
+                    await refresh_live_preview(
+                        project=project,
+                        run=run,
+                        artifact_root=DATA_DIR / "workflow-artifacts",
+                    )
+                except Exception as exc:
+                    # Preview delivery is deliberately non-blocking. The
+                    # original generated clip remains valid for final compose.
+                    ready.issues.append(f"流式预览暂不可用：{exc}")
+                workflow_store.put(run)
 
             if ready.kind == "asset_analysis":
                 project = require_project(project_id)
@@ -804,19 +1180,12 @@ async def _run_one_click_production(project_id: str) -> None:
                     "brand_bible": bible.model_copy(update={"status": "approved"}),
                     "updated_at": now(),
                 }))
-                # The first draft may have been created before visual analysis.
-                # Regenerate it now so the director receives the approved,
-                # project-scoped material facts before any billable node runs.
-                project = require_project(project_id)
-                grounded_plan = await generate_creative_plan(project)
-                grounded_project = persist_project(project.model_copy(update={
-                    "creative_plan": grounded_plan,
-                    "status": "planned",
-                    "updated_at": now(),
-                }))
-                # Mirror the grounded shot IDs into the remaining DAG before
-                # any keyframe or video job can start. Preserve the completed
-                # zero-cost asset analysis when its cache fingerprint matches.
+                # The user has explicitly selected and locked this creative
+                # plan.  Visual analysis may strengthen the Brand Bible, but
+                # must never silently replace the selected script, narration,
+                # shot IDs or sound plan.  The approved facts are consumed by
+                # build_production_plan when prompts are assembled.
+                grounded_project = require_project(project_id)
                 fresh_run = build_workflow(
                     grounded_project,
                     build_production_plan(grounded_project),
@@ -843,10 +1212,17 @@ async def produce_project_one_click(
     if not any(asset.kind == AssetKind.product for asset in project.assets):
         raise HTTPException(status_code=409, detail="请至少上传一张商品图片")
     if not project.creative_plan:
-        creative_plan = await generate_creative_plan(project)
-        project = persist_project(project.model_copy(update={
-            "creative_plan": creative_plan, "status": "planned", "updated_at": now(),
-        }))
+        raise HTTPException(status_code=409, detail="请先完成素材视觉理解，并从候选方案中锁定一个脚本。")
+    current_asset_ids = [asset.id for asset in project.assets]
+    if (
+        project.creative_plan.source_asset_ids != current_asset_ids
+        or not project.creative_plan.source_facts
+        or project.asset_analysis_status != "ready"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="当前脚本没有绑定最新素材事实。请返回故事页，重新执行素材理解并选择脚本。",
+        )
     production_plan = build_production_plan(project)
     if production_plan.cost.estimated_total > payload.budget_cny:
         raise HTTPException(
@@ -882,7 +1258,16 @@ def resume_project_one_click(
     run = workflow_store.get(project_id)
     if not run:
         raise HTTPException(status_code=404, detail="生产流程不存在")
-    if not project.production_budget or not project.production_budget.approved:
+    # Resuming a workflow that only has free review/composition work left must
+    # not be blocked by a missing production budget.  A budget remains
+    # mandatory whenever any paid node could still become executable.
+    pending_billable = any(
+        node.billable and node.status not in {"completed", "skipped"}
+        for node in run.nodes
+    )
+    if pending_billable and (
+        not project.production_budget or not project.production_budget.approved
+    ):
         raise HTTPException(status_code=409, detail="本项目尚未批准生产预算")
     if any(node.status == "running" for node in run.nodes):
         raise HTTPException(status_code=409, detail="生产流程已经在运行")
@@ -908,6 +1293,45 @@ def get_project_workflow(project_id: str) -> WorkflowRun:
         return workflow_store.put(fresh)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/workflow/events")
+async def stream_project_workflow(project_id: str) -> StreamingResponse:
+    """Stream durable workflow snapshots as Server-Sent Events.
+
+    The workflow JSON remains the source of truth, so reconnecting a browser
+    cannot lose state. Events are an inexpensive local equivalent of
+    ComfyUI's execution/status messages and remove blind polling delays.
+    """
+    require_project(project_id)
+
+    async def events():
+        last_revision = ""
+        idle_ticks = 0
+        while True:
+            run = workflow_store.get(project_id)
+            if run:
+                revision = run.updated_at.isoformat()
+                if revision != last_revision:
+                    payload = run.model_dump_json()
+                    yield f"event: workflow\ndata: {payload}\n\n"
+                    last_revision = revision
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
+            if idle_ticks >= 15:
+                yield ": keep-alive\n\n"
+                idle_ticks = 0
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get(
@@ -1109,10 +1533,60 @@ async def assemble_project_benchmark(
     response_model=WorkflowRun,
 )
 def retry_workflow_node(project_id: str, node_id: str) -> WorkflowRun:
-    require_project(project_id)
+    project = require_project(project_id)
     run = workflow_store.get(project_id)
     if not run:
         raise HTTPException(status_code=404, detail="工作流尚未创建。")
+    target = next((item for item in run.nodes if item.id == node_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"工作流节点不存在：{node_id}")
+    if target.kind not in {
+        "keyframe_generation",
+        "video_generation",
+        "keyframe_review",
+        "video_review",
+        "audio_timeline",
+        "composition",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="只能局部重做关键帧、视频镜头、质检、音频时间轴或最终合成节点。",
+        )
+    if target.kind == "video_generation":
+        missing_demo_keyframes: list[str] = []
+        for dependency_id in target.dependencies:
+            if not dependency_id.startswith("keyframe-review:"):
+                continue
+            keyframe_id = dependency_id.replace("keyframe-review:", "keyframe:", 1)
+            keyframe = next((item for item in run.nodes if item.id == keyframe_id), None)
+            has_image = bool(
+                keyframe
+                and keyframe.attempts
+                and keyframe.attempts[-1].outputs.get("image_path")
+            )
+            if not has_image:
+                missing_demo_keyframes.append(keyframe_id)
+        if missing_demo_keyframes:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "这是旧版演示工作流，没有可复用的真实关键帧，不能只重做视频镜头。"
+                    "请点击“按当前脚本开始真实生成”，系统将从关键帧开始建立完整产物链。"
+                ),
+            )
+    approved_budget = (
+        project.production_budget.approved_cny
+        if project.production_budget and project.production_budget.approved
+        else 0
+    )
+    if target.billable and run.actual_cost_cny + target.estimated_cost_cny > approved_budget + 0.0001:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"局部重做预计增加 ¥{target.estimated_cost_cny:.2f}，将超过当前项目预算上限。"
+                "请提高预算后再重做，或选择接受当前镜头。"
+            ),
+        )
     try:
         reset_node_and_descendants(run, node_id)
     except ValueError as exc:
@@ -1285,7 +1759,7 @@ def recover_project_keyframes(project_id: str) -> WorkflowRun:
                 number=number,
                 status="completed",
                 provider="seedream-official",
-                model_id=getenv("ARK_IMAGE_MODEL", "doubao-seedream-4-5-251128"),
+                model_id=getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128"),
                 estimated_cost_cny=node.estimated_cost_cny,
                 actual_cost_cny=node.estimated_cost_cny,
                 finished_at=now().astimezone(),
@@ -1293,7 +1767,7 @@ def recover_project_keyframes(project_id: str) -> WorkflowRun:
                     "image_path": str(path),
                     "raw_image_path": str(raw) if raw.is_file() else "",
                     "provider": "seedream-official",
-                    "model_id": getenv("ARK_IMAGE_MODEL", "doubao-seedream-4-5-251128"),
+                    "model_id": getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128"),
                     "recovered": "true",
                 },
             ))
@@ -1315,7 +1789,7 @@ class VideoAttemptSelectionRequest(BaseModel):
     "/api/projects/{project_id}/workflow/nodes/{node_id}/select-video-attempt",
     response_model=WorkflowRun,
 )
-def select_video_attempt(
+async def select_video_attempt(
     project_id: str,
     node_id: str,
     payload: VideoAttemptSelectionRequest,
@@ -1363,6 +1837,14 @@ def select_video_attempt(
             f"已人工选择视频尝试 {payload.preferred_attempt}；请确认是否覆盖此前自动质检结果。"
         ]
     refresh_readiness(run)
+    try:
+        await refresh_live_preview(
+            project=require_project(project_id),
+            run=run,
+            artifact_root=DATA_DIR / "workflow-artifacts",
+        )
+    except Exception as exc:
+        node.issues.append(f"候选已切换，但流式预览刷新失败：{exc}")
     return workflow_store.put(run)
 
 

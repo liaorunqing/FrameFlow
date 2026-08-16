@@ -2,6 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.packaging-venv/
+build/
+dist/FrameFlow/
+*.zip
+tests/artifacts/
 frontend/node_modules/
 *.tsbuildinfo
 *.log
@@ -9,6 +14,8 @@ frontend/node_modules/
 .env
 backend/.env
 backend/data/*
+!backend/data/catalog-assets/
+!backend/data/catalog-assets/*.jpg
 !backend/data/benchmark-artifacts/
 !backend/data/benchmark-artifacts/.gitkeep
 !backend/data/benchmark-datasets/

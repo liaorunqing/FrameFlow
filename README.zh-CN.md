@@ -45,6 +45,14 @@ flowchart LR
 
 ## Windows 快速启动
 
+### 推荐：免 Python 的 EXE 版本
+
+从 GitHub Releases 下载 `FrameFlow-Windows-x64` 压缩包，完整解压后双击 `FrameFlow.exe`。程序会自动寻找 8000–8010 范围内的可用端口并打开浏览器。便携包已包含 Python 运行时、前端、预置素材和 FFmpeg；API Key 仍由用户在首次打开后的设置页填写，并且只保存在本机。
+
+请勿只复制单独的 EXE；`_internal`、`frontend`、`backend` 和 `ffmpeg-bin` 文件夹必须与它放在同一目录。
+
+### 源码版本
+
 环境要求：Python 3.12+，并确保 FFmpeg 已加入 `PATH`。
 
 1. 下载或克隆仓库。

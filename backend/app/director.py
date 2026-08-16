@@ -330,10 +330,14 @@ def _fallback_plan(project: Project, reason: str = "未配置可用的导演模�
 
 
 def _director_request(project: Project) -> str:
+    user_brief = project.brief.strip()
+    product_name = project.product_name.strip()
+    if product_name in {"待定义商品", "未命名商品", "商品"}:
+        product_name = "上传参考图中的商品（名称未填写，以视觉事实描述为准）"
     return json.dumps({
         "任务": "为以下产品创作一支具有完整因果关系、可逐镜头生成的观察式生活微纪录片。",
         "项目": {
-            "产品": project.product_name,
+            "产品": product_name,
             "品类": project.product_category,
             "平台": project.platform,
             "总时长": project.duration,
@@ -341,11 +345,17 @@ def _director_request(project: Project) -> str:
             "风格": project.style,
             "受众": project.audience,
             "卖点": project.selling_points,
-            "用户要求": project.brief,
+            "视觉模型从上传素材提取的事实（强约束）": project.asset_facts,
+            "用户故事要求（可选）": user_brief or "用户未指定故事；请根据真实素材、商品卖点、受众、平台和所选风格自主构思。",
+            "故事创作权限": (
+                "用户已填写故事要求：将其作为强约束，在不违反素材事实和安全规则的前提下忠实执行。"
+                if user_brief else
+                "用户未填写故事要求：由你自主决定人物目标、触发事件、行动、可见结果和情绪落点；避免空泛模板和卖点罗列。"
+            ),
             "已批准素材事实（强约束，不得改写或补造）": bible_constraints(project),
         },
         "输出要求": {
-            "product_name必须逐字复制项目中的产品名": project.product_name,
+            "故事中使用的产品身份": product_name,
             "所有JSON Schema字段都必须填写，不允许使用空字符串逃避故事设计": True,
             "所有镜头duration之和必须严格等于项目总时长": True,
             "15秒使用3个镜头，30秒使用5个镜头，镜头之间必须具有明确因果关系": True,
@@ -353,6 +363,8 @@ def _director_request(project: Project) -> str:
             "prompt必须包含具体动作、机位、光线、表演和连续性约束": True,
             "logline、protagonist、story_question必须具体描述本片人物与事件": True,
             "禁止替换成其他商品、品牌或示例故事": True,
+            "故事中的商品外观、人物、场景和动作条件必须能追溯到视觉素材事实": True,
+            "用户故事要求为空时必须主动完成原创故事设计，不能追问用户补写脚本": True,
             "儿童与家庭品类必须避开刀具、火源、污染和危险模仿动作": True,
             "商品出现方式必须自然、卫生、符合真实生活逻辑": True,
             "必须包含环境建立、真实操作、可见反馈或结果三类纪录片证据": True,
@@ -520,7 +532,12 @@ async def _request_director_draft(
         "messages": messages,
     }
     reasoning_effort = getenv("DIRECTOR_REASONING_EFFORT", "").strip().lower()
-    if reasoning_effort in {"none", "low", "medium", "high"}:
+    # Ark's OpenAI-compatible Chat endpoint currently rejects the
+    # reasoning_effort extension even though DashScope accepts it.
+    if "ark.cn-beijing.volces.com" in base_url:
+        payload["thinking"] = {"type": "disabled"}
+        payload["max_tokens"] = 5000
+    elif reasoning_effort in {"none", "low", "medium", "high"}:
         payload["reasoning_effort"] = reasoning_effort
     timeout = max(60.0, float(getenv("DIRECTOR_TIMEOUT_SECONDS", "180")))
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:

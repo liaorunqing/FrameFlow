@@ -11,6 +11,15 @@ export interface Asset {
   created_at: string
 }
 
+export interface CatalogItem {
+  id: string
+  kind: 'product' | 'character' | 'scene'
+  title: string
+  description: string
+  image_url: string
+  source_url: string
+}
+
 export interface Shot {
   id: string
   index: number
@@ -46,6 +55,9 @@ export interface StorySequence {
 }
 
 export interface CreativePlan {
+  version_id: string
+  source_asset_ids: string[]
+  source_facts: string[]
   director_source: 'ollama' | 'openai_compatible' | 'fallback'
   director_model: string
   director_note: string
@@ -139,6 +151,7 @@ export interface SetupStatus {
   video_provider: string
   minimax_configured: boolean
   seedance_configured: boolean
+  ai_provider: 'dashscope' | 'ark'
 }
 
 export interface Project {
@@ -152,6 +165,10 @@ export interface Project {
   output_url?: string
   brand_bible?: BrandBible
   production_budget?: ProductionBudget
+  asset_analysis_status: 'pending' | 'running' | 'ready' | 'failed'
+  asset_analysis_model: string
+  analyzed_asset_ids: string[]
+  asset_facts: string[]
   name: string
   product_name: string
   product_category: string
@@ -179,6 +196,7 @@ export interface Project {
   transition_style: string
   realism_level: string
   negative_constraints: string
+  quality_mode: 'advisory' | 'strict' | 'technical'
 }
 
 export interface AudioOptions {
@@ -271,6 +289,10 @@ export interface WorkflowRun {
   estimated_cost_cny: number
   actual_cost_cny: number
   progress: number
+  live_preview_url: string
+  live_preview_revision: number
+  live_preview_ready_shots: number
+  live_preview_complete: boolean
 }
 
 export interface ProviderCapability {

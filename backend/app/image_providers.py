@@ -27,8 +27,8 @@ class VolcArkSeedreamProvider:
             "ARK_API_BASE",
             "https://ark.cn-beijing.volces.com/api/v3",
         ).rstrip("/")
-        self.model = getenv("ARK_IMAGE_MODEL", "doubao-seedream-4-5-251128").strip()
-        self.unit_price = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.25"))
+        self.model = getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128").strip()
+        self.unit_price = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.22"))
 
     @staticmethod
     def _size(aspect_ratio: str) -> str:
@@ -80,7 +80,10 @@ class VolcArkSeedreamProvider:
             aspect_ratio=aspect_ratio,
             max_images=max_images,
         )
-        async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+        # Do not inherit a desktop/system proxy here. In Clash Fake-IP setups
+        # that proxy can answer the Ark path itself and turn a valid endpoint
+        # into a misleading HTTP 404.
+        async with httpx.AsyncClient(timeout=300, follow_redirects=True, trust_env=False) as client:
             response = await client.post(
                 f"{self.api_base}/images/generations",
                 headers={
@@ -89,7 +92,22 @@ class VolcArkSeedreamProvider:
                 },
                 json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                try:
+                    error = (response.json().get("error") or {})
+                    code = str(error.get("code") or "")
+                    message = str(error.get("message") or "")
+                except (ValueError, AttributeError):
+                    code, message = "", response.text[:500]
+                if code == "ModelNotOpen":
+                    raise RuntimeError(
+                        f"火山方舟尚未开通关键帧模型 {self.model}（ModelNotOpen）。"
+                        "请在模型开通管理中启用 Seedream 后，仅重做当前关键帧。"
+                    )
+                raise RuntimeError(
+                    f"Seedream 图片生成失败 HTTP {response.status_code}"
+                    f"{f' [{code}]' if code else ''}：{message or '未知错误'}"
+                )
         body = response.json()
         urls = [
             str(item["url"])

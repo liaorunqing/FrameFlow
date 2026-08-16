@@ -45,6 +45,14 @@ flowchart LR
 
 ## Quick start on Windows
 
+### Recommended: portable EXE, no Python required
+
+Download the `FrameFlow-Windows-x64` archive from GitHub Releases, extract the complete folder, and double-click `FrameFlow.exe`. The launcher selects an available port from 8000–8010 and opens the studio in your browser. The portable build includes the Python runtime, frontend, starter assets, and FFmpeg. API keys are entered on first launch and remain local.
+
+Keep `_internal`, `frontend`, `backend`, and `ffmpeg-bin` beside the executable; copying only `FrameFlow.exe` is not supported.
+
+### Source checkout
+
 Requirements: Python 3.12+ and FFmpeg available on `PATH`.
 
 1. Download or clone the repository.

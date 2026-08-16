@@ -296,6 +296,8 @@ class PipelineExecutor:
             node.id,
             outputs={
                 "creative_plan_json": str(target),
+                "script_version": project.creative_plan.version_id,
+                "source_asset_ids": ",".join(project.creative_plan.source_asset_ids),
                 "shotcraft_summary": json.dumps(
                     shotcraft_summary(), ensure_ascii=False, separators=(",", ":")
                 ),
@@ -534,7 +536,9 @@ class PipelineExecutor:
                 "within_budget": str(decision.within_budget).lower(),
             },
             actual_cost_cny=0,
-            review_required=True,
+            # A successful cloud-vision review is final.  Only a failed
+            # review should pause the one-click workflow for operator action.
+            review_required=not passed,
         )
         node.quality_decision = decision.model_dump(mode="json")
         node.issues = [] if passed else [decision.summary]
@@ -933,11 +937,12 @@ class PipelineExecutor:
         reviews = []
         product_reviews = []
         product_references = self.asset_paths(project)[AssetKind.product]
+        character_references = self.asset_paths(project)[AssetKind.character]
         for frame in frames:
             review = await service.review_composition(
                 candidate=frame,
                 expected_story_state=expected,
-                expected_people_count=1,
+                expected_people_count=1 if character_references else 0,
                 allow_camera_gaze=False,
             )
             reviews.append(review.model_dump(mode="json"))
@@ -1023,7 +1028,9 @@ class PipelineExecutor:
                 "within_budget": str(decision.within_budget).lower(),
             },
             actual_cost_cny=0,
-            review_required=True,
+            # Passing reviews continue automatically; failures retain the
+            # report and stop on this exact shot for a local repair decision.
+            review_required=not passed,
         )
         node.quality_decision = decision.model_dump(mode="json")
         node.issues = [] if passed else [decision.summary]

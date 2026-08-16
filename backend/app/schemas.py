@@ -24,10 +24,11 @@ class ProjectCreate(BaseModel):
     style: str = "观察式生活微纪录片"
     audience: str = "关注孩子成长与陪伴的年轻父母"
     selling_points: list[str] = Field(default_factory=lambda: ["安全材质", "激发创造力"])
-    brief: str = "记录真实人物在具体生活情境中的一次使用过程，以动作、反馈和自然反应呈现产品价值。"
+    brief: str = ""
 
 
 class ProjectPatch(BaseModel):
+    quality_mode: Literal["advisory", "strict", "technical"] | None = None
     script_template: str | None = None
     voice_id: str | None = None
     voice_speed: float | None = Field(default=None, ge=0.7, le=1.3)
@@ -103,6 +104,9 @@ class StorySequence(BaseModel):
 
 
 class CreativePlan(BaseModel):
+    version_id: str = ""
+    source_asset_ids: list[str] = Field(default_factory=list)
+    source_facts: list[str] = Field(default_factory=list)
     director_source: Literal["ollama", "openai_compatible", "fallback"] = "fallback"
     director_model: str = ""
     director_note: str = ""
@@ -202,6 +206,10 @@ class Project(BaseModel):
     output_url: str | None = None
     brand_bible: BrandBible | None = None
     production_budget: ProductionBudget | None = None
+    asset_analysis_status: Literal["pending", "running", "ready", "failed"] = "pending"
+    asset_analysis_model: str = ""
+    analyzed_asset_ids: list[str] = Field(default_factory=list)
+    asset_facts: list[str] = Field(default_factory=list)
     name: str
     product_name: str
     product_category: str
@@ -229,6 +237,7 @@ class Project(BaseModel):
     transition_style: str = "match-action"
     realism_level: str = "photoreal"
     negative_constraints: str = "禁止乱码、水印、额外人物、产品变形、手部异常和虚假功效"
+    quality_mode: Literal["advisory", "strict", "technical"] = "advisory"
 
 
 class LibraryAssetRequest(BaseModel):
