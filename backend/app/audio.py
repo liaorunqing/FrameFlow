@@ -182,11 +182,9 @@ async def synthesize_windows_narration(
     allow_paid_fallback: bool = False,
 ) -> Path:
     powershell = shutil.which("powershell")
-    if not powershell:
-        raise RuntimeError("系统找不到 PowerShell，无法调用本地中文语音。")
-    script = Path(__file__).resolve().parents[2] / "scripts" / "synthesize_speech.ps1"
-    if not script.is_file():
-        raise RuntimeError("本地语音脚本不存在。")
+    app_home = getenv("FRAMEFLOW_HOME", "").strip()
+    project_root = Path(app_home).resolve() if app_home else Path(__file__).resolve().parents[2]
+    script = project_root / "scripts" / "synthesize_speech.ps1"
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     edge_tts = shutil.which("edge-tts")
@@ -268,6 +266,8 @@ async def synthesize_windows_narration(
         text_file.write_text(cue.text, encoding="utf-8")
         raw = raw_wav
         try:
+            if not powershell or not script.is_file():
+                raise RuntimeError("Windows 本地语音运行体不可用。")
             await run(
                 powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", str(script), "-TextFile", str(text_file),

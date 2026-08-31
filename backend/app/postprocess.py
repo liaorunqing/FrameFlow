@@ -10,7 +10,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_configured_home = os.getenv("FRAMEFLOW_HOME", "").strip()
+PROJECT_ROOT = Path(_configured_home).resolve() if _configured_home else Path(__file__).resolve().parents[2]
 LOCAL_REALESRGAN = (
     PROJECT_ROOT
     / "tools"

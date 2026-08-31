@@ -10,7 +10,17 @@ from pydantic import BaseModel, Field
 from .schemas import Project
 
 
-SHOTCRAFT_AUDIO_ROOT = Path("C:/Users/liaoq/.codex/skills/video-shotcraft/assets/audio")
+def shotcraft_audio_root() -> Path:
+    """Resolve bundled customer audio before the developer-only skill path."""
+    configured = os.getenv("FRAMEFLOW_AUDIO_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    app_home = os.getenv("FRAMEFLOW_HOME", "").strip()
+    project_root = Path(app_home) if app_home else Path(__file__).resolve().parents[2]
+    bundled = project_root / "backend" / "data" / "audio"
+    if bundled.is_dir():
+        return bundled
+    return Path("C:/Users/liaoq/.codex/skills/video-shotcraft/assets/audio")
 
 
 class SoundCue(BaseModel):
@@ -74,10 +84,11 @@ def build_creative_post_plan(project: Project, output_root: Path) -> CreativePos
         raise ValueError("项目缺少已批准分镜。")
     audio_root = output_root / "licensed-audio"
     safe_bgm_name = Path(project.bgm_track).name
-    bgm_source = SHOTCRAFT_AUDIO_ROOT / "bgm" / safe_bgm_name if safe_bgm_name != "none" else None
-    transition_source = SHOTCRAFT_AUDIO_ROOT / "sfx" / "transition" / "sweep-fast-small.mp3"
-    impact_source = SHOTCRAFT_AUDIO_ROOT / "sfx" / "impact" / "bass-hit-short.mp3"
-    sparkle_source = SHOTCRAFT_AUDIO_ROOT / "sfx" / "light" / "sparkle-touch.mp3"
+    source_root = shotcraft_audio_root()
+    bgm_source = source_root / "bgm" / safe_bgm_name if safe_bgm_name != "none" else None
+    transition_source = source_root / "sfx" / "transition" / "sweep-fast-small.mp3"
+    impact_source = source_root / "sfx" / "impact" / "bass-hit-short.mp3"
+    sparkle_source = source_root / "sfx" / "light" / "sparkle-touch.mp3"
     for source in (transition_source, impact_source, sparkle_source):
         if not source.is_file():
             raise FileNotFoundError(f"Shotcraft 音频资产缺失：{source}")
@@ -166,7 +177,7 @@ def build_creative_post_plan(project: Project, output_root: Path) -> CreativePos
         plan.model_dump_json(indent=2), encoding="utf-8"
     )
     attribution = output_root / "licensed-audio" / "ATTRIBUTION.md"
-    source_attribution = SHOTCRAFT_AUDIO_ROOT / "ATTRIBUTION.md"
+    source_attribution = source_root / "ATTRIBUTION.md"
     if source_attribution.is_file():
         shutil.copy2(source_attribution, attribution)
     return plan

@@ -25,7 +25,7 @@ from .orchestration import (
     start_node,
 )
 from .production import ProductionPlan, build_production_plan
-from .providers import get_provider
+from .providers import VideoJob, get_provider
 from .postprocess import interpolate_video_rife, upscale_video_realesrgan
 from .quality_control import decide_keyframe_quality, decide_video_quality
 from .routing import route_shot
@@ -162,11 +162,18 @@ class PipelineExecutor:
             raise PermissionError(
                 f"节点“{node.label}”会调用付费API，必须显式确认本次计费。"
             )
-        if node.status not in {"ready", "failed"}:
+        resumable = (
+            node.status == "running"
+            and node.kind == "video_generation"
+            and bool(node.attempts)
+            and bool(node.attempts[-1].outputs.get("external_task_id"))
+        )
+        if node.status not in {"ready", "failed"} and not resumable:
             raise ValueError(f"节点当前状态不可执行：{node.status}")
 
-        start_node(run, node_id)
-        self.workflow_store.put(run)
+        if not resumable:
+            start_node(run, node_id)
+            self.workflow_store.put(run)
         try:
             plan = build_production_plan(project)
             if node.kind == "asset_analysis":
@@ -296,6 +303,8 @@ class PipelineExecutor:
             node.id,
             outputs={
                 "creative_plan_json": str(target),
+                "script_version": project.creative_plan.version_id,
+                "source_asset_ids": ",".join(project.creative_plan.source_asset_ids),
                 "shotcraft_summary": json.dumps(
                     shotcraft_summary(), ensure_ascii=False, separators=(",", ":")
                 ),
@@ -534,7 +543,9 @@ class PipelineExecutor:
                 "within_budget": str(decision.within_budget).lower(),
             },
             actual_cost_cny=0,
-            review_required=True,
+            # A successful cloud-vision review is final.  Only a failed
+            # review should pause the one-click workflow for operator action.
+            review_required=not passed,
         )
         node.quality_decision = decision.model_dump(mode="json")
         node.issues = [] if passed else [decision.summary]
@@ -558,7 +569,9 @@ class PipelineExecutor:
             rate=round((project.voice_speed - 1.0) * 10),
             cloud_voice_id=project.voice_id,
             cloud_speed=project.voice_speed,
-            allow_paid_fallback=not project.voice_id.startswith("Microsoft "),
+            # Audio is currently a zero-cost workflow node. Never silently
+            # spend MiniMax balance when a local/Edge voice is unavailable.
+            allow_paid_fallback=False,
         )
         timeline_json.write_text(
             timeline.model_dump_json(indent=2),
@@ -824,16 +837,47 @@ class PipelineExecutor:
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        attempt = node.attempts[-1]
+        external_task_id = attempt.outputs.get("external_task_id", "")
+        if external_task_id and attempt.provider:
+            provider_name = attempt.provider
         provider = get_provider(provider_name)
-        node.attempts[-1].provider = provider.name
-        job = await provider.submit_boundary(
-            prompt=prompt,
-            duration=spec.duration,
-            first_frame=first_frame,
-            last_frame=last_frame,
-            model_hint=decision.model_hint,
-            aspect_ratio=project.aspect_ratio,
-        )
+        if not external_task_id:
+            attempt.provider = provider.name
+        if external_task_id:
+            submitted = VideoJob(
+                external_id=external_task_id,
+                status="processing",
+                provider=attempt.provider or provider.name,
+                model_id=attempt.model_id,
+                estimated_cost=node.estimated_cost_cny,
+            )
+        else:
+            submitted = await provider.create_boundary_task(
+                prompt=prompt,
+                duration=spec.duration,
+                first_frame=first_frame,
+                last_frame=last_frame,
+                model_hint=decision.model_hint,
+                aspect_ratio=project.aspect_ratio,
+            )
+            attempt.provider = submitted.provider or provider.name
+            attempt.model_id = submitted.model_id
+            attempt.outputs.update({
+                "external_task_id": submitted.external_id,
+                "external_task_status": submitted.status,
+            })
+        if attempt.outputs.get("submitted_cost_accounted") != "true":
+            submitted_cost = submitted.estimated_cost or node.estimated_cost_cny
+            attempt.actual_cost_cny = submitted_cost
+            node.actual_cost_cny += submitted_cost
+            attempt.outputs["submitted_cost_accounted"] = "true"
+        # The provider may already have accepted and charged this task. Persist
+        # its identifier and conservative cost before the first poll/download.
+        self.workflow_store.put(run)
+        job = await provider.wait_for_completion(submitted)
+        attempt.outputs["external_task_status"] = job.status
+        self.workflow_store.put(run)
         target = self.project_root(project.id) / (
             f"shot-{spec.shot_index:02d}-attempt-{len(node.attempts):02d}.mp4"
         )
@@ -881,7 +925,9 @@ class PipelineExecutor:
                 "repair_prompt_applied": repair_patch if len(node.attempts) > 1 else "",
                 "prompt_json": str(prompt_path),
             },
-            actual_cost_cny=job.estimated_cost,
+            # Cost was conservatively booked when the provider accepted the
+            # task, so completion must not add it a second time.
+            actual_cost_cny=0,
         )
 
     async def _review_video(
@@ -933,11 +979,12 @@ class PipelineExecutor:
         reviews = []
         product_reviews = []
         product_references = self.asset_paths(project)[AssetKind.product]
+        character_references = self.asset_paths(project)[AssetKind.character]
         for frame in frames:
             review = await service.review_composition(
                 candidate=frame,
                 expected_story_state=expected,
-                expected_people_count=1,
+                expected_people_count=1 if character_references else 0,
                 allow_camera_gaze=False,
             )
             reviews.append(review.model_dump(mode="json"))
@@ -1023,7 +1070,9 @@ class PipelineExecutor:
                 "within_budget": str(decision.within_budget).lower(),
             },
             actual_cost_cny=0,
-            review_required=True,
+            # Passing reviews continue automatically; failures retain the
+            # report and stop on this exact shot for a local repair decision.
+            review_required=not passed,
         )
         node.quality_decision = decision.model_dump(mode="json")
         node.issues = [] if passed else [decision.summary]

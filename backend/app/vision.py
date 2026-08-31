@@ -61,19 +61,24 @@ class OllamaVisionService:
     def __init__(self, *, purpose: str = "analysis") -> None:
         self.provider = getenv("VISION_PROVIDER", "ollama").strip().lower()
         self.purpose = purpose
-        if self.provider in {"dashscope", "cloud", "qwen"}:
-            self.provider = "dashscope"
-            self.base_url = getenv(
-                "VISION_CLOUD_API_BASE",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ).rstrip("/")
-            model_env = "VISION_REVIEW_MODEL" if purpose == "review" else "VISION_CLOUD_MODEL"
-            model_default = "qwen3.6-flash" if purpose == "review" else "qwen3.7-plus"
-            self.model = getenv(model_env, model_default).strip()
-            self.api_key = (
-                getenv("VISION_CLOUD_API_KEY", "").strip()
-                or getenv("DASHSCOPE_API_KEY", "").strip()
+        if self.provider in {"dashscope", "cloud", "qwen", "ark", "volcengine", "doubao"}:
+            requested_provider = self.provider
+            self.provider = "ark" if requested_provider in {"ark", "volcengine", "doubao"} else "dashscope"
+            default_base = (
+                "https://ark.cn-beijing.volces.com/api/v3"
+                if self.provider == "ark"
+                else "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
+            self.base_url = getenv("VISION_CLOUD_API_BASE", default_base).rstrip("/")
+            model_env = "VISION_REVIEW_MODEL" if purpose == "review" else "VISION_CLOUD_MODEL"
+            # Prefer the flagship multimodal model for both analysis and QC.
+            # Flash can still be selected explicitly with VISION_REVIEW_MODEL.
+            model_default = "doubao-seed-2-0-lite-260215" if self.provider == "ark" else "qwen3.7-plus"
+            self.model = getenv(model_env, model_default).strip()
+            fallback_key = "ARK_API_KEY" if self.provider == "ark" else "DASHSCOPE_API_KEY"
+            # Prefer the provider-specific key. This prevents a stale generic
+            # cloud key from silently crossing providers after a UI switch.
+            self.api_key = getenv(fallback_key, "").strip() or getenv("VISION_CLOUD_API_KEY", "").strip()
         else:
             self.provider = "ollama"
             self.base_url = getenv("VISION_API_BASE", "http://127.0.0.1:11434").rstrip("/")
@@ -102,7 +107,7 @@ class OllamaVisionService:
         images: list[str | Path],
         schema: type[BaseModel],
     ) -> BaseModel:
-        if self.provider == "dashscope":
+        if self.provider in {"dashscope", "ark"}:
             try:
                 return await self._structured_cloud(prompt=prompt, images=images, schema=schema)
             except httpx.TransportError as cloud_error:
@@ -165,8 +170,9 @@ class OllamaVisionService:
         schema: type[BaseModel],
     ) -> BaseModel:
         if not self.api_key:
+            expected = "ARK_API_KEY" if self.provider == "ark" else "DASHSCOPE_API_KEY"
             raise RuntimeError(
-                "VISION_PROVIDER=dashscope requires DASHSCOPE_API_KEY or VISION_CLOUD_API_KEY"
+                f"VISION_PROVIDER={self.provider} requires {expected} or VISION_CLOUD_API_KEY"
             )
         schema_json = schema.model_json_schema()
         content: list[dict] = [{
@@ -183,6 +189,11 @@ class OllamaVisionService:
         payload = {
             "model": self.model,
             "temperature": 0,
+            # Visual evidence is consumed as a compact machine record.  A
+            # generous unconstrained completion lets reasoning-capable models
+            # repeat the schema and can truncate the JSON before its closing
+            # brace, which blocks the whole production pipeline.
+            "max_tokens": 1200,
             "stream": False,
             "messages": [{"role": "user", "content": content}],
             "response_format": {
@@ -194,6 +205,8 @@ class OllamaVisionService:
                 },
             },
         }
+        if self.provider == "ark":
+            payload["thinking"] = {"type": "disabled"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -274,6 +287,8 @@ class OllamaVisionService:
     ) -> AssetVisualProfile:
         prompt = (
             f"你是商业视频素材分析员。当前只有1张图片，类型是 {asset_type}。"
+            "输出必须简洁：summary不超过80个汉字；每个数组最多6项；每项不超过40个汉字；"
+            "不要解释分析过程，不要复述JSON Schema，不要输出Markdown。"
             "只描述图片中真实可见且可核验的信息，不猜测品牌、材质认证、人物姓名或使用效果。"
             "如果类型是product，只分析被展示或握持的商品主体，必须忽略握持者的手、衣服、"
             "背景门窗、地板和环境；这些都不能进入immutable_features。"

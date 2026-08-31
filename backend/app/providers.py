@@ -63,31 +63,15 @@ class VideoProvider(ABC):
         model_hint: str = "story",
         aspect_ratio: str = "9:16",
     ) -> VideoJob:
-        model_id, provider_duration, resolution, cost = self._route(model_hint, duration)
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "prompt": self._prepare_prompt(prompt),
-            "first_frame_image": self._data_uri(first_frame),
-            "duration": provider_duration,
-            "resolution": resolution,
-            # Provider prompt rewriting can discard precise identity clauses.
-            # Keep it opt-in for product-reference shots.
-            "prompt_optimizer": getenv("MINIMAX_PROMPT_OPTIMIZER", "false").strip().lower() == "true",
-            "fast_pretreatment": True,
-        }
+        references = [first_frame]
         if last_frame:
-            payload["last_frame_image"] = self._data_uri(last_frame)
-        created = await self._post("/v1/video_generation", payload)
-        self._check_api_response(created, "创建首尾帧视频任务")
-        task_id = str(created.get("task_id") or "")
-        if not task_id:
-            raise RuntimeError("MiniMax官方接口未返回task_id。")
-        return VideoJob(
-            external_id=task_id,
-            status="processing",
-            provider=self.name,
-            model_id=model_id,
-            estimated_cost=cost,
+            references.append(last_frame)
+        return await self.submit(
+            prompt=prompt,
+            duration=duration,
+            reference_images=references,
+            model_hint=model_hint,
+            aspect_ratio=aspect_ratio,
         )
 
     async def submit_boundary(
@@ -115,6 +99,14 @@ class VideoProvider(ABC):
             reference_images=references,
             model_hint=model_hint,
             aspect_ratio=aspect_ratio,
+        )
+
+    async def wait_for_completion(self, submitted: VideoJob) -> VideoJob:
+        """Wait for an already-created task without submitting another one."""
+        if submitted.status == "completed":
+            return submitted
+        raise NotImplementedError(
+            f"供应商 {self.name} 不支持从已保存的任务 ID 恢复轮询。"
         )
 
 
@@ -343,30 +335,28 @@ class MiniMaxOfficialVideoProvider(VideoProvider):
             aspect_ratio=aspect_ratio,
         )
         return await self.wait_for_completion(submitted)
-        model_id, provider_duration, resolution, cost = self._route(model_hint, duration)
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "prompt": self._prepare_prompt(prompt),
-            "first_frame_image": self._data_uri(first_frame),
-            "duration": provider_duration,
-            "resolution": resolution,
-            "prompt_optimizer": getenv("MINIMAX_PROMPT_OPTIMIZER", "false").strip().lower() == "true",
-            "fast_pretreatment": True,
-        }
-        if last_frame:
-            payload["last_frame_image"] = self._data_uri(last_frame)
-        created = await self._post("/v1/video_generation", payload)
-        self._check_api_response(created, "创建首尾帧视频任务")
-        task_id = str(created.get("task_id") or "")
-        if not task_id:
-            raise RuntimeError("MiniMax官方接口未返回task_id。")
-        return await self.wait_for_completion(VideoJob(
-            external_id=task_id,
-            status="processing",
-            provider=self.name,
-            model_id=model_id,
-            estimated_cost=cost,
-        ))
+
+    async def create_boundary_task(
+        self,
+        *,
+        prompt: str,
+        duration: int,
+        first_frame: str,
+        last_frame: str | None,
+        model_hint: str = "story",
+        aspect_ratio: str = "9:16",
+    ) -> VideoJob:
+        # Current Hailuo models use the reviewed opening frame. Continuity is
+        # carried by feeding the preceding clip's extracted terminal frame into
+        # the next shot, rather than asking MiniMax to accept an unsupported end
+        # frame field.
+        return await self.create_task(
+            prompt=prompt,
+            duration=duration,
+            reference_images=[first_frame],
+            model_hint=model_hint,
+            aspect_ratio=aspect_ratio,
+        )
 
     async def create_task(
         self,
@@ -712,11 +702,18 @@ class VolcArkSeedanceProvider(VideoProvider):
                 model_id=str(result.get("model") or ""),
             )
         if status in {"failed", "cancelled"}:
-            return VideoJob(
-                external_id=external_id,
-                status="failed",
-                provider=self.name,
-                model_id=str(result.get("model") or ""),
+            error = result.get("error") or {}
+            code = str(error.get("code") or "") if isinstance(error, dict) else ""
+            message = str(error.get("message") or "") if isinstance(error, dict) else str(error)
+            if code == "SetLimitExceeded" or "inference limit" in message.lower():
+                raise RuntimeError(
+                    "火山方舟 Seedance 推理限额已触发（SetLimitExceeded），模型服务已暂停。"
+                    "请在模型开通管理中调整或关闭安全体验模式后，从当前镜头继续。"
+                )
+            detail = "：".join(part for part in (code, message) if part)
+            raise RuntimeError(
+                f"Seedance 视频任务 {external_id} 生成失败"
+                + (f"：{detail}" if detail else "。")
             )
         return VideoJob(external_id=external_id, status="processing", provider=self.name)
 

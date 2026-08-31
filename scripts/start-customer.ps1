@@ -39,26 +39,42 @@ elseif (-not (Test-Path (Join-Path $frontendRoot "dist\index.html"))) {
     try { npm run build } finally { Pop-Location }
 }
 
-$existing = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $existing) {
+$port = 8000
+$existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$existingIsFrameFlow = $false
+if ($existing) {
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -TimeoutSec 2
+        $existingIsFrameFlow = $health.status -eq "ok"
+    }
+    catch { $existingIsFrameFlow = $false }
+}
+if ($existing -and -not $existingIsFrameFlow) {
+    $port = 8001..8010 | Where-Object {
+        -not (Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue)
+    } | Select-Object -First 1
+    if (-not $port) { throw "Ports 8000-8010 are occupied. Close another local service and try again." }
+    Write-Host "Port 8000 is used by another application; FrameFlow will use port $port." -ForegroundColor Yellow
+}
+if (-not $existingIsFrameFlow) {
     Start-Process -FilePath "python" -ArgumentList @(
-        "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8000"
+        "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "$port"
     ) -WorkingDirectory $projectRoot -WindowStyle Hidden | Out-Null
 }
 
 $ready = $false
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     try {
-        $response = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/health" -TimeoutSec 2
-        $projects = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/projects" -TimeoutSec 3
+        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -TimeoutSec 2
+        $projects = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/projects" -TimeoutSec 3
         if ($response.status -eq "ok" -and $null -ne $projects) { $ready = $true; break }
     }
     catch { Start-Sleep -Milliseconds 500 }
 }
 if (-not $ready) { throw "Backend failed to start. Check Python and port 8000." }
 
-Start-Process "http://127.0.0.1:8000"
+Start-Process "http://127.0.0.1:$port"
 Write-Host "FrameFlow is open. You may close this window." -ForegroundColor Green
-Write-Host "If the browser did not open, visit http://127.0.0.1:8000" -ForegroundColor DarkGray
+Write-Host "If the browser did not open, visit http://127.0.0.1:$port" -ForegroundColor DarkGray
 Start-Sleep -Seconds 3
 Stop-Transcript | Out-Null

@@ -29,7 +29,8 @@ class JsonStore:
             initial = self._empty()
             self._write(initial)
             return initial
-        # Accept the UTF-8 BOM written by Windows PowerShell 5 packaging tools.
+        # utf-8-sig accepts both ordinary UTF-8 and files created by Windows
+        # PowerShell 5, whose `-Encoding utf8` prepends a BOM.
         with self.path.open("r", encoding="utf-8-sig") as handle:
             return json.load(handle)
 

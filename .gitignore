@@ -9,6 +9,8 @@ frontend/node_modules/
 .env
 backend/.env
 backend/data/*
+!backend/data/audio/
+!backend/data/audio/**
 !backend/data/benchmark-artifacts/
 !backend/data/benchmark-artifacts/.gitkeep
 !backend/data/benchmark-datasets/
@@ -28,3 +30,8 @@ backend/data/*
 !backend/data/workflows/
 !backend/data/workflows/.gitkeep
 !backend/data/store.json
+tests/artifacts/
+build*/
+dist-release*/
+dist-pyinstaller*/
+*.zip

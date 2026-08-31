@@ -54,6 +54,8 @@ class ShotProductionSpec(BaseModel):
 
 class ProductionPlan(BaseModel):
     project_id: str
+    script_version: str = ""
+    source_asset_ids: list[str] = Field(default_factory=list)
     pipeline_version: str = "story-boundary-v1"
     strategy: Literal["shared_boundary_keyframes"] = "shared_boundary_keyframes"
     keyframe_model: str
@@ -113,7 +115,7 @@ def _product_lock(project: Project) -> str:
 def _assert_project_scoped_prompts(project: Project, prompts: list[str]) -> None:
     """Fail closed when legacy product facts leak into a different project."""
     approved, _ = _approved_subject_facts(project, "product")
-    approved_text = " ".join(approved).lower()
+    approved_text = " ".join([*approved, project.product_dimensions]).lower()
     combined = " ".join(prompts).lower()
     measurements = set(re.findall(r"\b\d+(?:\.\d+)?\s*(?:cm|mm)\b", combined))
     unsupported = sorted(value for value in measurements if value not in approved_text)
@@ -206,7 +208,7 @@ def _estimate_cost(project: Project, keyframe_count: int) -> CostEstimate:
     # Calibrated with the successful local 5 s / 1080p Seedance 1.0 Pro task:
     # 246,840 tokens, or 49,368 tokens per generated second.
     video_tokens = project.duration
-    keyframe_unit = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.25"))
+    keyframe_unit = float(getenv("ARK_SEEDREAM_PRICE_PER_IMAGE", "0.22"))
     minimax_6s = float(getenv("MINIMAX_FAST_6S_ESTIMATE_CNY", "1.35"))
     video_rate = round(minimax_6s / 6 * 1_000_000, 4)
     keyframe_cost = keyframe_count * keyframe_unit
@@ -292,6 +294,7 @@ def _video_prompt(project: Project, shot: Shot) -> tuple[str, dict[str, str]]:
         f"Only action: {sections['single_action']}. "
         f"Camera: {sections['camera']}. Performance: {sections['performance']} "
         f"Continuity: {sections['continuity']}. Product identity: {sections['product_lock']} "
+        f"Product scale: {project.product_scale}; real dimensions: {project.product_dimensions or 'follow the reference image, never oversized'}. "
         f"Physics: {sections['physics']} End-state handoff: {sections['handoff']} "
         f"Forbidden: {sections['negative']}"
     )
@@ -357,10 +360,12 @@ def build_production_plan(project: Project) -> ProductionPlan:
             ],
         ))
 
-    keyframe_model = getenv("ARK_IMAGE_MODEL", "doubao-seedream-4-5-251128").strip()
+    keyframe_model = getenv("ARK_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128").strip()
     video_model = getenv("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3-Fast").strip()
     plan = ProductionPlan(
         project_id=project.id,
+        script_version=project.creative_plan.version_id,
+        source_asset_ids=list(project.creative_plan.source_asset_ids),
         keyframe_model=keyframe_model,
         video_model=video_model,
         keyframes=keyframes,

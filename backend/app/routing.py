@@ -125,8 +125,20 @@ def route_shot(project: Project, shot: Shot, provider_override: str = "") -> Rou
             reasons.append("Seedance was selected as an explicit human upgrade.")
         provider = provider_override
     else:
-        # Seedance is never selected automatically: it is an explicit upgrade.
-        provider = _configured("minimax-official", "wan-bailian")
+        configured_default = getenv("VIDEO_PROVIDER", "minimax-official").strip()
+        supported = {
+            "minimax-official", "seedance-official", "wan-bailian", "demo"
+        }
+        provider = (
+            _configured(configured_default)
+            if configured_default in supported and configured_default != "demo"
+            else "demo" if configured_default == "demo"
+            else None
+        )
+        provider = provider or _configured(
+            "minimax-official", "seedance-official", "wan-bailian"
+        )
+        reasons.append(f"使用系统设置的默认视频供应商：{provider or 'demo'}")
 
     provider = provider or "demo"
     if provider == "wan-bailian" and not getenv("WAN_PROVIDER_ENABLED", "").strip():
